@@ -1,0 +1,10 @@
+services:
+  claude-watcher:
+    build: .
+    env_file: .env
+    volumes:
+      - watcher-data:/app/snapshots
+    restart: unless-stopped
+
+volumes:
+  watcher-data:

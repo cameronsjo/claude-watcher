@@ -1,0 +1,18 @@
+# Release Please — configured but disabled by default.
+# To enable: replace on: block with: on: push: branches: [main]
+# Also required: enable "Allow GitHub Actions to create and approve pull requests"
+# in repo Settings → Actions → General → Workflow permissions.
+name: Release Please
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

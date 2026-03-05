@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -27,6 +28,13 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     email_to: list[str] = []
     email_from: str = ""
+
+    @field_validator("email_to", mode="before")
+    @classmethod
+    def split_email_to(cls, v: str | list[str]) -> list[str]:
+        if isinstance(v, str):
+            return [addr.strip() for addr in v.split(",") if addr.strip()]
+        return v
 
     # Claude API
     anthropic_api_key: str = ""

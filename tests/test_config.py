@@ -33,16 +33,26 @@ def test_discord_disabled_when_empty() -> None:
 def test_email_enabled() -> None:
     settings = Settings(
         smtp_host="smtp.test.com",
-        email_to="test@test.com",
+        email_to=["test@test.com"],
         _env_file=None,  # type: ignore[call-arg]
     )
     assert settings.email_enabled is True
 
 
+def test_email_enabled_multiple_recipients() -> None:
+    settings = Settings(
+        smtp_host="smtp.test.com",
+        email_to=["a@test.com", "b@test.com"],
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    assert settings.email_enabled is True
+    assert len(settings.email_to) == 2
+
+
 def test_email_disabled_when_no_host() -> None:
     settings = Settings(
         smtp_host="",
-        email_to="test@test.com",
+        email_to=["test@test.com"],
         _env_file=None,  # type: ignore[call-arg]
     )
     assert settings.email_enabled is False

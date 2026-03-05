@@ -100,7 +100,7 @@ async def deliver_email(
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = settings.email_from
-    msg["To"] = settings.email_to
+    msg["To"] = ", ".join(settings.email_to)
 
     # Plain text version
     msg.attach(MIMEText(summary, "plain"))
@@ -122,6 +122,7 @@ font-size: 12px;">{diff.raw_diff[:50_000]}</pre>
     try:
         await aiosmtplib.send(
             msg,
+            recipients=settings.email_to,
             hostname=settings.smtp_host,
             port=settings.smtp_port,
             username=settings.smtp_username,

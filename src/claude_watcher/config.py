@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     smtp_port: int = 587
     smtp_username: str = ""
     smtp_password: str = ""
-    email_to: str = ""
+    email_to: list[str] = []
     email_from: str = ""
 
     # Claude API
@@ -49,7 +49,7 @@ class Settings(BaseSettings):
 
     @property
     def email_enabled(self) -> bool:
-        return bool(self.smtp_host and self.email_to)
+        return bool(self.smtp_host and len(self.email_to) > 0)
 
     @property
     def summarizer_enabled(self) -> bool:

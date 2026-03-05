@@ -37,10 +37,20 @@ def _run_git(
 
 
 def _ensure_git_repo(snapshots_dir: Path) -> None:
-    """Initialize git repo in snapshots dir if it doesn't exist."""
+    """Initialize git repo in snapshots dir if it doesn't exist.
+
+    Handles fresh volumes, bind mounts, and first-run scenarios.
+    """
     git_dir = snapshots_dir / ".git"
     if not git_dir.exists():
+        snapshots_dir.mkdir(parents=True, exist_ok=True)
         _run_git(["init", "-b", "main"], cwd=snapshots_dir)
+        # Set local identity so commits work without global git config
+        _run_git(["config", "user.name", "claude-watcher"], cwd=snapshots_dir)
+        _run_git(
+            ["config", "user.email", "claude-watcher@localhost"],
+            cwd=snapshots_dir,
+        )
         _run_git(
             ["commit", "--allow-empty", "-m", "init"],
             cwd=snapshots_dir,

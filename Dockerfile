@@ -22,8 +22,10 @@ RUN chown -R watcher:watcher /app
 
 USER watcher
 
-# Initialize git in snapshots for diffing
-RUN cd snapshots && git init -b main && git add -A && git commit --allow-empty -m "init"
+# Git identity for snapshot commits (differ.py auto-inits the repo at runtime)
+RUN git config --global user.name "claude-watcher" \
+    && git config --global user.email "claude-watcher@localhost" \
+    && git config --global init.defaultBranch main
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD python -c "print('ok')" || exit 1

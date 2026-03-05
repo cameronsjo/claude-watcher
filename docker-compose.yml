@@ -3,7 +3,10 @@ services:
     build: .
     env_file: .env
     volumes:
+      # Named volume (Docker-managed, survives rebuilds)
       - watcher-data:/app/snapshots
+      # Or use a bind mount for direct host access:
+      # - ./snapshots:/app/snapshots
     restart: unless-stopped
 
 volumes:

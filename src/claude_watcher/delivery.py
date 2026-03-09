@@ -1,5 +1,6 @@
 """Discord webhook and email delivery for digests."""
 
+import json
 from datetime import UTC, datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -72,7 +73,7 @@ async def deliver_discord(
                 # Multipart upload with file attachment
                 response = await client.post(
                     settings.discord_webhook_url,
-                    data={"payload_json": httpx.QueryParams(payload).multi_items()},
+                    data={"payload_json": json.dumps(payload)},
                     files=files,
                 )
             else:

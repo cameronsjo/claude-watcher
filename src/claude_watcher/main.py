@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import logging
 from datetime import UTC, datetime
 
 import httpx
@@ -31,7 +32,7 @@ def _configure_logging(settings: Settings) -> None:
             else structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
-            structlog.get_level_from_name(settings.log_level)
+            logging.getLevelNamesMapping()[settings.log_level]
         ),
     )
 

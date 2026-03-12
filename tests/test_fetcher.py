@@ -59,7 +59,11 @@ async def test_fetch_all_docs(httpx_mock, tmp_path: Path) -> None:
 
     httpx_mock.add_response(
         url="https://docs.test.com/llms.txt",
-        text="https://docs.test.com/en/hooks\nhttps://docs.test.com/en/plugins\n",
+        text=(
+            "# Test Docs\n\n## Docs\n\n"
+            "- [Hooks](https://docs.test.com/en/hooks): Hook reference.\n"
+            "- [Plugins](https://docs.test.com/en/plugins): Plugin guide.\n"
+        ),
     )
     httpx_mock.add_response(
         url="https://docs.test.com/en/hooks",

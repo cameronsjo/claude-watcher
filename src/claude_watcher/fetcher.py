@@ -1,6 +1,7 @@
 """Async page fetching from llms.txt and raw GitHub."""
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,10 +30,18 @@ async def fetch_page_list(client: httpx.AsyncClient, settings: Settings) -> list
     response = await client.get(llms_url)
     response.raise_for_status()
 
+    # llms.txt uses markdown link format: - [title](url): description
+    # Extract URLs from markdown links, falling back to bare URLs
+    link_pattern = re.compile(r"\(https?://[^)]+\)")
     urls: list[str] = []
     for line in response.text.splitlines():
         line = line.strip()
-        if line and line.startswith("http"):
+        if not line:
+            continue
+        match = link_pattern.search(line)
+        if match:
+            urls.append(match.group(0)[1:-1])  # Strip parens
+        elif line.startswith("http"):
             urls.append(line)
 
     logger.info("Fetched page list from llms.txt.", page_count=len(urls))

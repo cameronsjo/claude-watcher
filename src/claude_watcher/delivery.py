@@ -37,6 +37,35 @@ def _today_label() -> str:
     return datetime.now(tz=UTC).strftime("%Y-%m-%d")
 
 
+def _build_embed(summary: str, diff: DiffResult) -> dict:
+    """Build a structured Discord embed from the summary and diff metadata."""
+    title = f"Claude Code Digest — {_today_label()}"
+
+    description = summary
+    if len(description) > DISCORD_MAX_DESCRIPTION:
+        description = description[:DISCORD_MAX_DESCRIPTION] + "\n\n[...truncated]"
+
+    embed: dict = {
+        "title": title,
+        "description": description,
+        "color": _pick_color(summary),
+    }
+
+    # Add page change counts as a compact footer
+    parts: list[str] = []
+    if diff.new_pages:
+        parts.append(f"+{len(diff.new_pages)} new")
+    if diff.modified_pages:
+        parts.append(f"~{len(diff.modified_pages)} modified")
+    if diff.removed_pages:
+        parts.append(f"-{len(diff.removed_pages)} removed")
+
+    if parts:
+        embed["footer"] = {"text": " · ".join(parts)}
+
+    return embed
+
+
 async def deliver_discord(
     summary: str,
     diff: DiffResult,
@@ -47,30 +76,17 @@ async def deliver_discord(
         logger.info("Discord delivery skipped, no webhook configured.")
         return True
 
-    title = f"Claude Code Digest — {_today_label()}"
-    description = summary
-    if len(description) > DISCORD_MAX_DESCRIPTION:
-        description = description[:DISCORD_MAX_DESCRIPTION] + "\n\n[...truncated]"
+    embed = _build_embed(summary, diff)
+    payload: dict = {"embeds": [embed]}
 
-    payload: dict = {
-        "embeds": [
-            {
-                "title": title,
-                "description": description,
-                "color": _pick_color(summary),
-            }
-        ],
-    }
-
-    # Attach raw diff as file if it's too large for embed
+    # Attach raw diff as file — always as attachment, never inline
     files = None
-    if len(diff.raw_diff) > 2000:
+    if diff.raw_diff:
         files = {"file": ("diff.patch", diff.raw_diff.encode(), "text/plain")}
 
     async with httpx.AsyncClient() as client:
         try:
             if files:
-                # Multipart upload with file attachment
                 response = await client.post(
                     settings.discord_webhook_url,
                     data={"payload_json": json.dumps(payload)},

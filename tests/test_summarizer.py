@@ -8,7 +8,7 @@ from claude_watcher.summarizer import _fallback_summary, summarize_diff
 
 
 def test_fallback_summary() -> None:
-    """Fallback summary includes all change categories."""
+    """Fallback summary includes all change categories with counts."""
     diff = DiffResult(
         new_pages=["new-page.md"],
         removed_pages=["old-page.md"],
@@ -20,6 +20,23 @@ def test_fallback_summary() -> None:
     assert "new-page.md" in summary
     assert "old-page.md" in summary
     assert "changed-page.md" in summary
+    assert "3 page(s) changed" in summary
+    assert "summarizer unavailable" in summary
+    assert "**New Pages**" in summary
+    assert "**Removed Pages**" in summary
+    assert "**Modified Pages**" in summary
+
+
+def test_fallback_summary_custom_reason() -> None:
+    """Fallback summary displays the provided reason."""
+    diff = DiffResult(
+        modified_pages=["page.md"],
+        raw_diff="diff",
+    )
+    summary = _fallback_summary(diff, reason="API error")
+
+    assert "API error" in summary
+    assert "1 page(s) changed" in summary
 
 
 @pytest.mark.asyncio

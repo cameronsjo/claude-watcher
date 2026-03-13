@@ -114,8 +114,24 @@ def compute_diff(snapshots_dir: Path) -> DiffResult | None:
     return result
 
 
-def commit_snapshot(snapshots_dir: Path, scope: str) -> None:
-    """Commit current snapshot state after successful delivery."""
+def _ensure_remote(snapshots_dir: Path, remote_url: str) -> None:
+    """Configure the git remote, updating the URL if it changed."""
+    result = _run_git(["remote", "get-url", "origin"], cwd=snapshots_dir, check=False)
+    if result.returncode != 0:
+        _run_git(["remote", "add", "origin", remote_url], cwd=snapshots_dir)
+        logger.info("Added git remote.", url=remote_url)
+    elif result.stdout.strip() != remote_url:
+        _run_git(["remote", "set-url", "origin", remote_url], cwd=snapshots_dir)
+        logger.info("Updated git remote URL.", url=remote_url)
+
+
+def commit_snapshot(
+    snapshots_dir: Path, scope: str, remote_url: str = ""
+) -> None:
+    """Commit current snapshot state after successful delivery.
+
+    If remote_url is provided, pushes to the remote after committing.
+    """
     _ensure_git_repo(snapshots_dir)
     _run_git(["add", "-A"], cwd=snapshots_dir)
 
@@ -129,3 +145,17 @@ def commit_snapshot(snapshots_dir: Path, scope: str) -> None:
         cwd=snapshots_dir,
     )
     logger.info("Committed snapshot.", scope=scope)
+
+    if remote_url:
+        _ensure_remote(snapshots_dir, remote_url)
+        result = _run_git(
+            ["push", "-u", "origin", "main"], cwd=snapshots_dir, check=False
+        )
+        if result.returncode == 0:
+            logger.info("Pushed snapshot to remote.", scope=scope)
+        else:
+            logger.error(
+                "Failed to push snapshot to remote.",
+                scope=scope,
+                stderr=result.stderr.strip(),
+            )

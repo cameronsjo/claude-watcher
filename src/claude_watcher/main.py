@@ -81,7 +81,7 @@ async def _run_pipeline(scope: str, settings: Settings) -> None:
 
     # Commit only after successful delivery
     if delivered:
-        commit_snapshot(settings.snapshots_dir, scope)
+        commit_snapshot(settings.snapshots_dir, scope, settings.git_remote_url)
     else:
         log.error(
             "Delivery failed, snapshot NOT committed. Changes preserved for next run."

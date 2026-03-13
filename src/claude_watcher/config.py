@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # Local state
     snapshots_dir: Path = Path("snapshots")
 
+    # Git remote — push snapshots to a remote repo (e.g., Gitea) after each commit
+    git_remote_url: str = ""
+
     # Logging
     log_level: str = "INFO"
 
@@ -58,6 +61,10 @@ class Settings(BaseSettings):
     @property
     def email_enabled(self) -> bool:
         return bool(self.smtp_host and len(self.email_to) > 0)
+
+    @property
+    def git_remote_enabled(self) -> bool:
+        return bool(self.git_remote_url)
 
     @property
     def summarizer_enabled(self) -> bool:

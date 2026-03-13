@@ -61,5 +61,5 @@ def test_build_embed_truncates_long_description() -> None:
     diff = DiffResult(modified_pages=["a.md"], raw_diff="diff")
     embed = _build_embed(long_summary, diff)
 
-    assert len(embed["description"]) <= 4020
+    assert len(embed["description"]) <= 4016
     assert embed["description"].endswith("[...truncated]")

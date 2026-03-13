@@ -13,7 +13,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from claude_watcher.config import Settings
 from claude_watcher.delivery import deliver
-from claude_watcher.differ import commit_snapshot, compute_diff
+from claude_watcher.differ import DiffResult, commit_snapshot, compute_diff
 from claude_watcher.fetcher import fetch_all_docs, fetch_changelog
 from claude_watcher.summarizer import summarize_diff
 
@@ -156,20 +156,53 @@ async def run_scheduler(settings: Settings) -> None:
         scheduler.shutdown()
 
 
+async def _test_summarizer(settings: Settings) -> None:
+    """Run the summarizer with a synthetic diff to verify API connectivity."""
+    synthetic_diff = DiffResult(
+        new_pages=["docs__new-hooks-api.md"],
+        removed_pages=["docs__deprecated-config.md"],
+        modified_pages=["CHANGELOG.md", "docs__cli-reference.md"],
+        raw_diff=(
+            "diff --git a/CHANGELOG.md b/CHANGELOG.md\n"
+            "--- a/CHANGELOG.md\n"
+            "+++ b/CHANGELOG.md\n"
+            "@@ -1,3 +1,8 @@\n"
+            "+## 1.2.0 (2026-03-13)\n"
+            "+- Added new hooks API for PreToolUse events\n"
+            "+- Removed deprecated config.legacy_mode setting\n"
+            "+- Fixed MCP server connection timeout handling\n"
+        ),
+    )
+    logger.info("Running summarizer test with synthetic diff...")
+    summary = await summarize_diff(synthetic_diff, settings)
+    print("\n--- Summarizer Output ---")
+    print(summary)
+    print("--- End ---")
+
+
 def main() -> None:
     """CLI entry point."""
-    parser = argparse.ArgumentParser(description="Claude Code documentation watcher")
+    parser = argparse.ArgumentParser(
+        description="Claude Code documentation watcher",
+    )
     parser.add_argument(
         "--once",
         action="store_true",
         help="Run a single full check cycle and exit",
+    )
+    parser.add_argument(
+        "--test-summary",
+        action="store_true",
+        help="Test the summarizer with a synthetic diff and exit",
     )
     args = parser.parse_args()
 
     settings = Settings()
     _configure_logging(settings)
 
-    if args.once:
+    if args.test_summary:
+        asyncio.run(_test_summarizer(settings))
+    elif args.once:
         asyncio.run(_run_pipeline("full", settings))
     else:
         asyncio.run(run_scheduler(settings))

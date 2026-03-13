@@ -125,9 +125,7 @@ def _ensure_remote(snapshots_dir: Path, remote_url: str) -> None:
         logger.info("Updated git remote URL.", url=remote_url)
 
 
-def commit_snapshot(
-    snapshots_dir: Path, scope: str, remote_url: str = ""
-) -> None:
+def commit_snapshot(snapshots_dir: Path, scope: str, remote_url: str = "") -> None:
     """Commit current snapshot state after successful delivery.
 
     If remote_url is provided, pushes to the remote after committing.

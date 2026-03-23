@@ -73,15 +73,10 @@ async def test_fetch_all_docs(httpx_mock, tmp_path: Path) -> None:
         url="https://docs.test.com/en/plugins",
         text="# Plugins\nPlugin content here.",
     )
-    httpx_mock.add_response(
-        url="https://raw.test.com/CHANGELOG.md",
-        text="# Changelog",
-    )
-
     import httpx
 
     async with httpx.AsyncClient() as client:
         result = await fetch_all_docs(client, settings)
 
-    assert len(result.fetched_pages) == 3
+    assert len(result.fetched_pages) == 2
     assert len(result.failed_pages) == 0

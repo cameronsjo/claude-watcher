@@ -122,8 +122,7 @@ async def fetch_all_docs(client: httpx.AsyncClient, settings: Settings) -> Fetch
     # Fetch page list
     urls = await fetch_page_list(client, settings)
 
-    # Add changelog URL
-    urls.append(settings.changelog_url)
+    # CHANGELOG.md is handled by its own job (check_changelog) — don't duplicate here
 
     # Fetch all pages concurrently with rate limiting
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)

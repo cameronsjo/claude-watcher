@@ -155,29 +155,9 @@ def _build_commit_message(
                 tldr = stripped.strip("*").strip()
 
     subject = f"docs({scope}): {counts}"
+
     if tldr:
-        # Keep subject under ~72 chars
-        max_tldr = 72 - len(subject) - 3  # 3 for " — "
-        if max_tldr > 10:
-            if len(tldr) > max_tldr:
-                tldr = tldr[: max_tldr - 1] + "…"
-            subject += f" — {tldr}"
-
-    # Body: file lists
-    body_lines: list[str] = []
-    if diff:
-        if diff.new_pages:
-            body_lines.append("New:")
-            body_lines.extend(f"  {p}" for p in diff.new_pages)
-        if diff.modified_pages:
-            body_lines.append("Modified:")
-            body_lines.extend(f"  {p}" for p in diff.modified_pages)
-        if diff.removed_pages:
-            body_lines.append("Removed:")
-            body_lines.extend(f"  {p}" for p in diff.removed_pages)
-
-    if body_lines:
-        return subject + "\n\n" + "\n".join(body_lines)
+        return subject + "\n\n" + tldr
     return subject
 
 

@@ -84,25 +84,22 @@ def test_build_commit_message_with_diff_and_summary() -> None:
     summary = "**TL;DR**: New Bedrock setup wizard and shell execution controls"
     msg = _build_commit_message("full", diff, summary)
 
-    # Subject has counts and TL;DR
+    # Subject has counts only
     subject = msg.splitlines()[0]
-    assert subject.startswith("docs(full): 1 new, 2 modified")
-    assert "Bedrock" in subject
+    assert subject == "docs(full): 1 new, 2 modified"
 
-    # Body has file lists
-    assert "new-page.md" in msg
-    assert "auth.md" in msg
+    # Body has TL;DR
+    assert "Bedrock" in msg
 
 
 def test_build_commit_message_no_summary() -> None:
-    """Without a summary, commit message still has counts and files."""
+    """Without a summary, commit message is just the subject."""
     diff = DiffResult(
         modified_pages=["config.md"],
         raw_diff="",
     )
     msg = _build_commit_message("changelog", diff)
-    assert msg.startswith("docs(changelog): 1 modified")
-    assert "config.md" in msg
+    assert msg == "docs(changelog): 1 modified"
 
 
 def test_build_commit_message_no_diff() -> None:

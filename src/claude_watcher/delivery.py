@@ -1,6 +1,5 @@
 """Discord webhook and email delivery for digests."""
 
-import json
 from datetime import UTC, datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -79,21 +78,9 @@ async def deliver_discord(
     embed = _build_embed(summary, diff)
     payload: dict = {"embeds": [embed]}
 
-    # Attach raw diff as file — always as attachment, never inline
-    files = None
-    if diff.raw_diff:
-        files = {"file": ("diff.patch", diff.raw_diff.encode(), "text/plain")}
-
     async with httpx.AsyncClient() as client:
         try:
-            if files:
-                response = await client.post(
-                    settings.discord_webhook_url,
-                    data={"payload_json": json.dumps(payload)},
-                    files=files,
-                )
-            else:
-                response = await client.post(settings.discord_webhook_url, json=payload)
+            response = await client.post(settings.discord_webhook_url, json=payload)
             response.raise_for_status()
             logger.info("Delivered digest to Discord.")
             return True

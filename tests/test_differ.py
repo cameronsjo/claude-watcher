@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from claude_watcher.differ import commit_snapshot, compute_diff
+from claude_watcher.differ import (
+    DiffResult,
+    _build_commit_message,
+    commit_snapshot,
+    compute_diff,
+)
 
 
 def test_no_changes_returns_none(tmp_path: Path) -> None:
@@ -66,3 +71,41 @@ def test_commit_snapshot(tmp_path: Path) -> None:
     # No new changes
     result = compute_diff(tmp_path)
     assert result is None
+
+
+def test_build_commit_message_with_diff_and_summary() -> None:
+    """Commit message includes counts, TL;DR, and file lists."""
+    diff = DiffResult(
+        new_pages=["new-page.md"],
+        modified_pages=["auth.md", "hooks.md"],
+        removed_pages=[],
+        raw_diff="",
+    )
+    summary = "**TL;DR**: New Bedrock setup wizard and shell execution controls"
+    msg = _build_commit_message("full", diff, summary)
+
+    # Subject has counts and TL;DR
+    subject = msg.splitlines()[0]
+    assert subject.startswith("docs(full): 1 new, 2 modified")
+    assert "Bedrock" in subject
+
+    # Body has file lists
+    assert "new-page.md" in msg
+    assert "auth.md" in msg
+
+
+def test_build_commit_message_no_summary() -> None:
+    """Without a summary, commit message still has counts and files."""
+    diff = DiffResult(
+        modified_pages=["config.md"],
+        raw_diff="",
+    )
+    msg = _build_commit_message("changelog", diff)
+    assert msg.startswith("docs(changelog): 1 modified")
+    assert "config.md" in msg
+
+
+def test_build_commit_message_no_diff() -> None:
+    """Gracefully handles missing diff."""
+    msg = _build_commit_message("full", None)
+    assert msg == "docs(full): update"

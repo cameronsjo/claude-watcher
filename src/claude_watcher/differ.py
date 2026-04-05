@@ -125,7 +125,69 @@ def _ensure_remote(snapshots_dir: Path, remote_url: str) -> None:
         logger.info("Updated git remote URL.", url=remote_url)
 
 
-def commit_snapshot(snapshots_dir: Path, scope: str, remote_url: str = "") -> None:
+def _build_commit_message(
+    scope: str, diff: DiffResult | None, summary: str = ""
+) -> str:
+    """Build a descriptive commit message from diff metadata and summary."""
+    # Subject line: counts
+    parts: list[str] = []
+    if diff:
+        if diff.new_pages:
+            parts.append(f"{len(diff.new_pages)} new")
+        if diff.modified_pages:
+            parts.append(f"{len(diff.modified_pages)} modified")
+        if diff.removed_pages:
+            parts.append(f"{len(diff.removed_pages)} removed")
+
+    counts = ", ".join(parts) if parts else "update"
+
+    # Extract TL;DR from summary if available
+    tldr = ""
+    if summary:
+        for line in summary.splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith("tl;dr"):
+                # Strip the "TL;DR:" prefix and markdown bold
+                tldr = stripped.split(":", 1)[-1].strip().strip("*").strip()
+                break
+            # First non-empty line as fallback
+            if stripped and not tldr:
+                tldr = stripped.strip("*").strip()
+
+    subject = f"docs({scope}): {counts}"
+    if tldr:
+        # Keep subject under ~72 chars
+        max_tldr = 72 - len(subject) - 3  # 3 for " — "
+        if max_tldr > 10:
+            if len(tldr) > max_tldr:
+                tldr = tldr[: max_tldr - 1] + "…"
+            subject += f" — {tldr}"
+
+    # Body: file lists
+    body_lines: list[str] = []
+    if diff:
+        if diff.new_pages:
+            body_lines.append("New:")
+            body_lines.extend(f"  {p}" for p in diff.new_pages)
+        if diff.modified_pages:
+            body_lines.append("Modified:")
+            body_lines.extend(f"  {p}" for p in diff.modified_pages)
+        if diff.removed_pages:
+            body_lines.append("Removed:")
+            body_lines.extend(f"  {p}" for p in diff.removed_pages)
+
+    if body_lines:
+        return subject + "\n\n" + "\n".join(body_lines)
+    return subject
+
+
+def commit_snapshot(
+    snapshots_dir: Path,
+    scope: str,
+    remote_url: str = "",
+    diff: DiffResult | None = None,
+    summary: str = "",
+) -> None:
     """Commit current snapshot state after successful delivery.
 
     If remote_url is provided, pushes to the remote after committing.
@@ -138,8 +200,9 @@ def commit_snapshot(snapshots_dir: Path, scope: str, remote_url: str = "") -> No
     if not stat.stdout.strip():
         return
 
+    message = _build_commit_message(scope, diff, summary)
     _run_git(
-        ["commit", "-m", f"chore: update {scope} snapshot"],
+        ["commit", "-m", message],
         cwd=snapshots_dir,
     )
     logger.info("Committed snapshot.", scope=scope)

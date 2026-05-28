@@ -13,7 +13,7 @@ Fetch all pages → git diff → Claude summary → Discord + Email → git comm
 ```
 
 - **Source discovery**: Auto-fetches all pages from `code.claude.com/docs/llms.txt`
-- **State store**: Git repo — snapshots committed after each run, `git log` = history, `git diff HEAD~1` = last changes
+- **State store**: Git repo — snapshots committed after each run, `git log` = history, `git diff HEAD~1` = last changes. Set `WATCHER_GIT_REMOTE_URL` to also push that history to a remote (e.g. Gitea/GitHub) after every commit; leave it unset to keep commits local to the volume
 - **Smart scheduling**: Polls based on Anthropic's publishing patterns (peak hours more frequent)
 - **Categorized digests**: Security, breaking changes, plugin impact, new features
 

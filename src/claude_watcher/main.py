@@ -14,6 +14,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from claude_watcher.config import Settings
 from claude_watcher.delivery import deliver
 from claude_watcher.differ import DiffResult, commit_snapshot, compute_diff
+from claude_watcher.drift_checker import check_drift
 from claude_watcher.fetcher import fetch_all_docs, fetch_changelog
 from claude_watcher.summarizer import summarize_diff
 
@@ -92,6 +93,18 @@ async def _run_pipeline(scope: str, settings: Settings) -> None:
         log.error(
             "Delivery failed, snapshot NOT committed. Changes preserved for next run."
         )
+
+    # Drift check — runs only for full docs scope when the gate is active
+    if scope == "full" and settings.drift_check_active:
+        log.info("Running drift check.")
+        drift_digest = await check_drift(diff, settings)
+        if drift_digest:
+            log.info("Drift findings detected, delivering drift digest.")
+            # Empty diff: the drift digest stands alone — the upstream docs
+            # diff (page counts, raw_diff) is unrelated to drift findings.
+            drift_delivered = await deliver(drift_digest, DiffResult(), settings)
+            if not drift_delivered:
+                log.warning("Drift digest delivery failed; findings may be lost.")
 
 
 async def check_changelog(settings: Settings) -> None:

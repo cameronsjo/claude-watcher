@@ -65,6 +65,41 @@ make docker-run
 | CHANGELOG.md | Every 1 hour | Every 4 hours |
 | Full docs site | Once daily at midnight CST | Once daily at midnight CST |
 
+## Drift Check
+
+After each full docs run, the watcher can compare changed upstream pages against your local ecosystem files (skills, guides, plugin references) and deliver a separate digest when it detects contradictions or gaps.
+
+### How it works
+
+```text
+Changed upstream pages → intersect with drift-mappings.yaml
+  → fetch raw ecosystem files
+  → Claude Haiku maps each pair (does this contradict or omit?)
+  → Claude Sonnet reduces findings into a prioritized digest
+  → Deliver as a separate digest (WRONG / OUTDATED items)
+```
+
+### Enable
+
+Set `WATCHER_DRIFT_CHECK_ENABLED=true` in your `.env`. Requires `WATCHER_ANTHROPIC_API_KEY`.
+
+The mapping file (`drift-mappings.yaml` at repo root by default) links upstream doc filenames to raw GitHub URLs of your ecosystem files. The filename convention matches the snapshot filenames produced by the fetcher: `docs__en__<page>.md`.
+
+```yaml
+docs__en__hooks.md:
+  - https://raw.githubusercontent.com/yourorg/yourrepo/main/skills/writing-hooks.md
+```
+
+The mapping file is itself drift-prone — review entries whenever upstream docs are restructured.
+
+### Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `WATCHER_DRIFT_CHECK_ENABLED` | `false` | Enable drift checking |
+| `WATCHER_DRIFT_MAPPINGS_FILE` | `drift-mappings.yaml` | Path to the mapping file |
+| `WATCHER_DRIFT_REVIEW_MODEL` | `claude-sonnet-4-6` | Model for drift synthesis (optional) |
+
 ## License
 
 MIT

@@ -41,7 +41,7 @@ categories that have relevant changes:
 
 Under each category, use bullet points (`-`) with concise descriptions. \
 Reference exact setting names, hook types, API changes, or config keys.
-Highlight anything a plugin developer or security engineer should act on with \u26a0\ufe0f.
+Flag anything a plugin developer or security engineer must act on with \u26a0\ufe0f.
 Skip categories with no relevant changes.
 Keep the total response under 3500 characters."""
 
@@ -97,7 +97,7 @@ async def summarize_diff(diff: DiffResult, settings: Settings) -> str:
     # Fan-out uses Haiku — fast and cheap for focused per-file work
     map_model = "claude-haiku-4-5-20251001"
     # Synthesis uses Sonnet for higher-quality cross-file reasoning
-    reduce_model = "claude-sonnet-4-20250514"
+    reduce_model = "claude-sonnet-4-6"
 
     per_file = _split_by_file(diff.raw_diff)
 

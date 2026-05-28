@@ -83,8 +83,11 @@ class Settings(BaseSettings):
             return False
         if not self.anthropic_api_key:
             return False
-        if not self.drift_mappings_file.exists():
-            return False
-        if self.drift_mappings_file.stat().st_size == 0:
+        # Stat atomically (no exists()-then-stat() TOCTOU): a missing or
+        # unreadable mapping file raises OSError -> gate closed.
+        try:
+            if self.drift_mappings_file.stat().st_size == 0:
+                return False
+        except OSError:
             return False
         return True

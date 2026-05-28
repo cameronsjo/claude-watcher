@@ -7,7 +7,7 @@ import pytest
 
 from claude_watcher.config import Settings
 from claude_watcher.differ import DiffResult
-from claude_watcher.drift_checker import check_drift
+from claude_watcher.drift_checker import _load_mappings, check_drift
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -85,6 +85,29 @@ async def test_empty_mapping_file_returns_none(tmp_path: Path) -> None:
 
     assert result is None
     mock_cls.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _load_mappings: drop malformed entries (non-list / non-string URLs)
+# ---------------------------------------------------------------------------
+
+
+def test_load_mappings_drops_non_string_urls(tmp_path: Path) -> None:
+    """Entries with non-string URLs are dropped, not crashed on at fetch time."""
+    mappings_path = tmp_path / "drift-mappings.yaml"
+    mappings_path.write_text(
+        "good.md:\n"
+        "  - https://example.com/a.md\n"
+        "mixed.md:\n"
+        "  - 123\n"
+        "  - https://example.com/b.md\n"
+        "not_a_list.md: https://example.com/c.md\n"
+    )
+
+    result = _load_mappings(mappings_path)
+
+    # Only the all-strings entry survives; mixed-type list and scalar are dropped.
+    assert result == {"good.md": ["https://example.com/a.md"]}
 
 
 # ---------------------------------------------------------------------------

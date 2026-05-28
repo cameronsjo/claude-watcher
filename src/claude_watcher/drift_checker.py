@@ -56,7 +56,13 @@ def _load_mappings(mappings_file: Path) -> dict[str, list[str]]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {k: v for k, v in data.items() if isinstance(v, list)}
+    # Keep only string-list values: non-string URLs would raise an unhandled
+    # TypeError when fetched. The mapping file is user-maintained.
+    return {
+        k: v
+        for k, v in data.items()
+        if isinstance(v, list) and all(isinstance(url, str) for url in v)
+    }
 
 
 async def _fetch_ecosystem_file(client: httpx.AsyncClient, url: str) -> str | None:

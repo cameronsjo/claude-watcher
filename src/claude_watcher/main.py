@@ -100,7 +100,9 @@ async def _run_pipeline(scope: str, settings: Settings) -> None:
         drift_digest = await check_drift(diff, settings)
         if drift_digest:
             log.info("Drift findings detected, delivering drift digest.")
-            drift_delivered = await deliver(drift_digest, diff, settings)
+            # Empty diff: the drift digest stands alone — the upstream docs
+            # diff (page counts, raw_diff) is unrelated to drift findings.
+            drift_delivered = await deliver(drift_digest, DiffResult(), settings)
             if not drift_delivered:
                 log.warning("Drift digest delivery failed; findings may be lost.")
 

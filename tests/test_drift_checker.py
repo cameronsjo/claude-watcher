@@ -9,7 +9,6 @@ from claude_watcher.config import Settings
 from claude_watcher.differ import DiffResult
 from claude_watcher.drift_checker import check_drift
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -171,7 +170,9 @@ async def test_drift_found_returns_digest(tmp_path: Path, httpx_mock) -> None:
     map_message.content = [MagicMock(text="- Hook event names changed from X to Y")]
 
     reduce_message = MagicMock()
-    reduce_message.content = [MagicMock(text="WRONG: Hook event names changed from X to Y")]
+    reduce_message.content = [
+        MagicMock(text="WRONG: Hook event names changed from X to Y")
+    ]
     reduce_message.usage = MagicMock(input_tokens=100, output_tokens=50)
 
     mock_anthropic = AsyncMock()

@@ -100,7 +100,9 @@ async def _run_pipeline(scope: str, settings: Settings) -> None:
         drift_digest = await check_drift(diff, settings)
         if drift_digest:
             log.info("Drift findings detected, delivering drift digest.")
-            await deliver(drift_digest, diff, settings)
+            drift_delivered = await deliver(drift_digest, diff, settings)
+            if not drift_delivered:
+                log.warning("Drift digest delivery failed; findings may be lost.")
 
 
 async def check_changelog(settings: Settings) -> None:

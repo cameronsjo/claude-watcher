@@ -1,4 +1,4 @@
-"""Ecosystem drift detection: compare upstream docs changes against local ecosystem files."""
+"""Ecosystem drift detection: compare upstream docs against local ecosystem files."""
 
 import asyncio
 from pathlib import Path
@@ -13,12 +13,15 @@ from claude_watcher.differ import DiffResult
 
 logger = structlog.get_logger()
 
-# MAP prompt: focused per-pair analysis — does the ecosystem file conflict with the upstream page?
+# MAP prompt: per-pair analysis — does the ecosystem file conflict with upstream?
 _MAP_PROMPT = """\
 You are a drift detector for a Claude Code plugin ecosystem.
-You will receive an upstream Claude Code documentation page and a local ecosystem file (a skill, guide, or reference).
-Identify specific items where the ecosystem file now CONTRADICTS or OMITS something the upstream page states.
-Focus on: API changes, renamed flags/settings/hook types, removed features, new required fields, changed behavior.
+You will receive an upstream Claude Code documentation page and a local ecosystem file
+(a skill, guide, or reference).
+Identify specific items where the ecosystem file now CONTRADICTS or OMITS something the
+upstream page states.
+Focus on: API changes, renamed flags/settings/hook types, removed features, new required
+fields, changed behavior.
 Output a concise bullet list. If no drift exists, output exactly: NO DRIFT"""
 
 # REDUCE prompt: synthesize map results into a prioritized digest
@@ -34,8 +37,23 @@ Use Discord markdown. Keep the total response under 2500 characters."""
 
 def _load_mappings(mappings_file: Path) -> dict[str, list[str]]:
     """Load the YAML mapping of upstream page -> ecosystem file URLs."""
-    with mappings_file.open() as fh:
-        data = yaml.safe_load(fh)
+    try:
+        with mappings_file.open() as fh:
+            data = yaml.safe_load(fh)
+    except OSError as exc:
+        logger.warning(
+            "Drift check: cannot read mappings file.",
+            path=str(mappings_file),
+            error=str(exc),
+        )
+        return {}
+    except yaml.YAMLError as exc:
+        logger.warning(
+            "Drift check: invalid YAML in mappings file.",
+            path=str(mappings_file),
+            error=str(exc),
+        )
+        return {}
     if not isinstance(data, dict):
         return {}
     return {k: v for k, v in data.items() if isinstance(v, list)}
@@ -138,7 +156,9 @@ async def check_drift(diff: DiffResult, settings: Settings) -> str | None:
                 page=page,
             )
             continue
-        upstream_content = snapshot_path.read_text(encoding="utf-8")
+        upstream_content = await asyncio.to_thread(
+            snapshot_path.read_text, encoding="utf-8"
+        )
         pairs.append((page, upstream_content, url, content))
 
     if not pairs:
@@ -152,7 +172,9 @@ async def check_drift(diff: DiffResult, settings: Settings) -> str | None:
     # MAP step — fan out per pair
     try:
         map_tasks = [
-            _check_pair(page, upstream_content, url, ecosystem_content, client, map_model)
+            _check_pair(
+                page, upstream_content, url, ecosystem_content, client, map_model
+            )
             for page, upstream_content, url, ecosystem_content in pairs
         ]
         map_results = await asyncio.gather(*map_tasks)
@@ -177,8 +199,7 @@ async def check_drift(diff: DiffResult, settings: Settings) -> str | None:
 
     # REDUCE step — synthesize into a single digest
     reduce_input = "\n\n".join(
-        f"### {page} vs {url}\n{findings}"
-        for page, url, findings in drift_findings
+        f"### {page} vs {url}\n{findings}" for page, url, findings in drift_findings
     )
 
     try:

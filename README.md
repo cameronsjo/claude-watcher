@@ -71,7 +71,7 @@ After each full docs run, the watcher can compare changed upstream pages against
 
 ### How it works
 
-```
+```text
 Changed upstream pages → intersect with drift-mappings.yaml
   → fetch raw ecosystem files
   → Claude Haiku maps each pair (does this contradict or omit?)

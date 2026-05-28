@@ -41,7 +41,7 @@ categories that have relevant changes:
 
 Under each category, use bullet points (`-`) with concise descriptions. \
 Reference exact setting names, hook types, API changes, or config keys.
-Highlight anything a plugin developer or security engineer should act on with \u26a0\ufe0f.
+Flag anything a plugin developer or security engineer must act on with \u26a0\ufe0f.
 Skip categories with no relevant changes.
 Keep the total response under 3500 characters."""
 

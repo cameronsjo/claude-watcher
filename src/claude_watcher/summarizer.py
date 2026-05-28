@@ -97,7 +97,7 @@ async def summarize_diff(diff: DiffResult, settings: Settings) -> str:
     # Fan-out uses Haiku — fast and cheap for focused per-file work
     map_model = "claude-haiku-4-5-20251001"
     # Synthesis uses Sonnet for higher-quality cross-file reasoning
-    reduce_model = "claude-sonnet-4-20250514"
+    reduce_model = "claude-sonnet-4-6"
 
     per_file = _split_by_file(diff.raw_diff)
 

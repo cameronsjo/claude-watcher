@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
+    # Drift check — detects when upstream docs contradict ecosystem files
+    drift_check_enabled: bool = False
+    drift_mappings_file: Path = Path("drift-mappings.yaml")
+    # Optional: override the reduce model for drift review (falls back to Sonnet)
+    drift_review_model: str = ""
+
     @property
     def discord_enabled(self) -> bool:
         return bool(self.discord_webhook_url)
@@ -69,3 +75,16 @@ class Settings(BaseSettings):
     @property
     def summarizer_enabled(self) -> bool:
         return bool(self.anthropic_api_key)
+
+    @property
+    def drift_check_active(self) -> bool:
+        """Effective gate: toggle on + API key present + mapping file non-empty."""
+        if not self.drift_check_enabled:
+            return False
+        if not self.anthropic_api_key:
+            return False
+        if not self.drift_mappings_file.exists():
+            return False
+        if self.drift_mappings_file.stat().st_size == 0:
+            return False
+        return True

@@ -40,7 +40,10 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
 
     # Source URLs
-    docs_base_url: str = "https://code.claude.com/docs"
+    docs_base_url: str = "https://code.claude.com/docs"  # Claude Code docs
+    # Anthropic API docs — index lives at the domain root (/llms.txt); page URLs
+    # in it are absolute (.../docs/en/<path>.md), so base is the root host.
+    api_docs_base_url: str = "https://platform.claude.com"
     changelog_url: str = (
         "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md"
     )
@@ -59,6 +62,11 @@ class Settings(BaseSettings):
     drift_mappings_file: Path = Path("drift-mappings.yaml")
     # Optional: override the reduce model for drift review (falls back to Sonnet)
     drift_review_model: str = ""
+
+    @property
+    def api_docs_enabled(self) -> bool:
+        """Whether the Anthropic API docs source is tracked. Empty URL disables."""
+        return bool(self.api_docs_base_url)
 
     @property
     def discord_enabled(self) -> bool:

@@ -57,7 +57,7 @@ async def _run_pipeline(scope: str, settings: Settings) -> None:
     log = logger.bind(scope=scope)
     log.info("Starting check cycle.")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         # Fetch
         if scope == "changelog":
             fetch_result = await fetch_changelog(client, settings)
@@ -105,6 +105,32 @@ async def _run_pipeline(scope: str, settings: Settings) -> None:
             drift_delivered = await deliver(drift_digest, DiffResult(), settings)
             if not drift_delivered:
                 log.warning("Drift digest delivery failed; findings may be lost.")
+
+
+async def _seed_baseline(settings: Settings) -> None:
+    """Fetch all sources and commit the baseline without summarizing or delivering.
+
+    Establishes the snapshot baseline for a newly added source quietly, so the
+    next scheduled run only diffs genuine changes instead of treating every page
+    as new (which would fan out one summarization call per page).
+    """
+    log = logger.bind(scope="seed")
+    log.info("Seeding baseline snapshot.")
+
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        fetch_result = await fetch_all_docs(client, settings)
+
+    if not fetch_result.fetched_pages:
+        log.warning("No pages fetched, nothing to seed.")
+        return
+
+    # Commit current state with no summary and no delivery.
+    commit_snapshot(settings.snapshots_dir, "seed", settings.git_remote_url)
+    log.info(
+        "Seeded baseline; no digest sent.",
+        fetched=len(fetch_result.fetched_pages),
+        new=len(fetch_result.new_pages),
+    )
 
 
 async def check_changelog(settings: Settings) -> None:
@@ -214,6 +240,11 @@ def main() -> None:
         action="store_true",
         help="Test the summarizer with a synthetic diff and exit",
     )
+    parser.add_argument(
+        "--seed",
+        action="store_true",
+        help="Fetch all sources and commit the baseline without sending a digest",
+    )
     args = parser.parse_args()
 
     settings = Settings()
@@ -221,6 +252,8 @@ def main() -> None:
 
     if args.test_summary:
         asyncio.run(_test_summarizer(settings))
+    elif args.seed:
+        asyncio.run(_seed_baseline(settings))
     elif args.once:
         asyncio.run(_run_pipeline("full", settings))
     else:

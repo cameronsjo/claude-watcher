@@ -11,6 +11,11 @@ dev:
 run:
 	uv run python -m claude_watcher.main --once
 
+.PHONY: seed
+# Seed the baseline snapshot for all sources (no digest sent)
+seed:
+	uv run python -m claude_watcher.main --seed
+
 .PHONY: start
 # Start the scheduler
 start:

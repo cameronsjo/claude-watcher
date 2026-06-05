@@ -12,10 +12,26 @@ Claude Code releases multiple times per week with no RSS feed or structured chan
 Fetch all pages → git diff → Claude summary → Discord + Email → git commit
 ```
 
-- **Source discovery**: Auto-fetches all pages from `code.claude.com/docs/llms.txt`
+- **Source discovery**: Auto-fetches all pages from each source's `llms.txt` index:
+  - **Claude Code docs** — `code.claude.com/docs/llms.txt` → committed flat in `snapshots/`
+  - **Anthropic API docs** — `platform.claude.com/llms.txt` (~1,500 pages) → committed under `snapshots/api-docs/`. Set `WATCHER_API_DOCS_BASE_URL=""` to disable this source.
 - **State store**: Git repo — snapshots committed after each run, `git log` = history, `git diff HEAD~1` = last changes. Set `WATCHER_GIT_REMOTE_URL` to also push that history to a remote (e.g. Gitea/GitHub) after every commit; leave it unset to keep commits local to the volume
 - **Smart scheduling**: Polls based on Anthropic's publishing patterns (peak hours more frequent)
 - **Categorized digests**: Security, breaking changes, plugin impact, new features
+
+### Adding / seeding a source
+
+The first time a source is enabled, every page looks "new" — for the ~1,500-page
+API docs index that would mean one ~1,500-file diff and a summarization call per
+page on the first scheduled run. Seed the baseline quietly instead:
+
+```bash
+make seed   # fetch all sources + commit, no summary, no delivery
+```
+
+Run this once when first enabling the API docs source, **before** `make start`.
+After seeding, the next `make run` reports "No changes detected" until the docs
+actually change, and steady-state runs only diff genuine changes.
 
 ## Getting Started
 

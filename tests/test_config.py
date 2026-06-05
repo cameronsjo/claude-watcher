@@ -30,6 +30,22 @@ def test_discord_disabled_when_empty() -> None:
     assert settings.discord_enabled is False
 
 
+def test_api_docs_enabled_by_default() -> None:
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    assert settings.api_docs_base_url == "https://platform.claude.com"
+    assert settings.api_docs_enabled is True
+
+
+def test_api_docs_disabled_when_empty() -> None:
+    settings = Settings(
+        api_docs_base_url="",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    assert settings.api_docs_enabled is False
+
+
 def test_email_enabled() -> None:
     settings = Settings(
         smtp_host="smtp.test.com",

@@ -53,6 +53,7 @@ async def test_fetch_all_docs(httpx_mock, tmp_path: Path) -> None:
     settings = Settings(
         snapshots_dir=tmp_path,
         docs_base_url="https://docs.test.com",
+        api_docs_base_url="",  # single-source: API docs disabled here
         changelog_url="https://raw.test.com/CHANGELOG.md",
         _env_file=None,  # type: ignore[call-arg]
     )
@@ -80,3 +81,64 @@ async def test_fetch_all_docs(httpx_mock, tmp_path: Path) -> None:
 
     assert len(result.fetched_pages) == 2
     assert len(result.failed_pages) == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_docs_multi_source(httpx_mock, tmp_path: Path) -> None:
+    """Both sources are fetched; API pages land namespaced under api-docs/.
+
+    The two sources use a page path that maps to the *same* flat filename
+    (``docs__shared.md``) to prove the subdirectory prevents a collision.
+    """
+    from claude_watcher.fetcher import API_DOCS_SUBDIR
+
+    settings = Settings(
+        snapshots_dir=tmp_path,
+        docs_base_url="https://code.test.com",
+        api_docs_base_url="https://platform.test.com",
+        changelog_url="https://raw.test.com/CHANGELOG.md",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+
+    # Claude Code docs index + page → flat snapshots/docs__shared.md
+    httpx_mock.add_response(
+        url="https://code.test.com/llms.txt",
+        text="- [Shared](https://code.test.com/docs/shared): Claude Code page.\n",
+    )
+    httpx_mock.add_response(
+        url="https://code.test.com/docs/shared",
+        text="# Claude Code shared",
+    )
+    # API docs index + page → snapshots/api-docs/docs__shared.md
+    httpx_mock.add_response(
+        url="https://platform.test.com/llms.txt",
+        text="- [Shared](https://platform.test.com/docs/shared): API page.\n",
+    )
+    httpx_mock.add_response(
+        url="https://platform.test.com/docs/shared",
+        text="# Anthropic API shared",
+    )
+    import httpx
+
+    async with httpx.AsyncClient() as client:
+        result = await fetch_all_docs(client, settings)
+
+    assert len(result.fetched_pages) == 2
+    assert len(result.failed_pages) == 0
+
+    # Both base URLs were hit (llms.txt of each)
+    requested = {str(r.url) for r in httpx_mock.get_requests()}
+    assert "https://code.test.com/llms.txt" in requested
+    assert "https://platform.test.com/llms.txt" in requested
+
+    # Namespaced layout: same filename, different directories, no collision
+    flat = tmp_path / "docs__shared.md"
+    namespaced = tmp_path / API_DOCS_SUBDIR / "docs__shared.md"
+    assert flat.exists()
+    assert namespaced.exists()
+    assert flat.read_text() == "# Claude Code shared"
+    assert namespaced.read_text() == "# Anthropic API shared"
+
+    # Report names keep the sources distinct
+    assert "docs__shared.md" in result.fetched_pages
+    assert f"{API_DOCS_SUBDIR}/docs__shared.md" in result.fetched_pages

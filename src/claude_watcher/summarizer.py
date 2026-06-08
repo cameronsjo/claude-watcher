@@ -1,13 +1,15 @@
 """Claude API digest generation from documentation diffs."""
 
-import asyncio
 import re
 
 import anthropic
 import structlog
 
+from claude_watcher.concurrency import bounded_gather
 from claude_watcher.config import Settings
 from claude_watcher.differ import DiffResult
+
+_TRUNCATION_MARKER = "\n[... diff truncated ...]"
 
 logger = structlog.get_logger()
 
@@ -67,18 +69,48 @@ def _split_by_file(raw_diff: str) -> dict[str, str]:
     return files
 
 
+def _stub_summary(filename: str) -> str:
+    """Placeholder used when a single file can't be summarized."""
+    return f"(summary unavailable — {filename} changed)"
+
+
 async def _summarize_file(
-    filename: str, chunk: str, client: anthropic.AsyncAnthropic, model: str
+    filename: str,
+    chunk: str,
+    client: anthropic.AsyncAnthropic,
+    model: str,
+    max_chars: int,
 ) -> tuple[str, str]:
-    """Summarize a single file diff. Returns (filename, summary)."""
-    response = await client.messages.create(
-        model=model,
-        max_tokens=512,
-        system=_FILE_SUMMARY_PROMPT,
-        messages=[
-            {"role": "user", "content": f"FILE: {filename}\n\n```diff\n{chunk}\n```"}
-        ],
-    )
+    """Summarize a single file diff. Returns (filename, summary).
+
+    Truncates the per-file input to `max_chars` so one oversized doc can't
+    overflow the model context window, and isolates per-file API failures: a
+    failed call returns a stub instead of aborting the whole digest.
+    """
+    user_content = f"FILE: {filename}\n\n```diff\n{chunk}\n```"
+    if len(user_content) > max_chars:
+        # Truncate the diff so the whole message (wrapper + marker) fits the
+        # budget — guarantees len(user_content) <= max_chars.
+        overhead = len(user_content) - len(chunk)
+        budget = max(0, max_chars - overhead - len(_TRUNCATION_MARKER))
+        chunk = chunk[:budget] + _TRUNCATION_MARKER
+        user_content = f"FILE: {filename}\n\n```diff\n{chunk}\n```"
+
+    try:
+        response = await client.messages.create(
+            model=model,
+            max_tokens=512,
+            system=_FILE_SUMMARY_PROMPT,
+            messages=[{"role": "user", "content": user_content}],
+        )
+    except anthropic.APIError as exc:
+        logger.warning(
+            "Per-file summarization failed, using stub.",
+            file=filename,
+            error=str(exc),
+            status_code=getattr(exc, "status_code", None),
+        )
+        return filename, _stub_summary(filename)
     return filename, response.content[0].text
 
 
@@ -93,7 +125,10 @@ async def summarize_diff(diff: DiffResult, settings: Settings) -> str:
         logger.warning("Summarizer disabled — WATCHER_ANTHROPIC_API_KEY not set.")
         return _fallback_summary(diff, reason="no API key configured")
 
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    client = anthropic.AsyncAnthropic(
+        api_key=settings.anthropic_api_key,
+        max_retries=settings.summarizer_max_retries,
+    )
     # Fan-out uses Haiku — fast and cheap for focused per-file work
     map_model = "claude-haiku-4-5-20251001"
     # Synthesis uses Sonnet for higher-quality cross-file reasoning
@@ -101,32 +136,52 @@ async def summarize_diff(diff: DiffResult, settings: Settings) -> str:
 
     per_file = _split_by_file(diff.raw_diff)
 
+    # Per-run cap — keep the burst bounded. Excess files are surfaced as a
+    # deferred list rather than silently dropped.
+    items = list(per_file.items())
+    deferred: list[str] = []
+    if settings.summarizer_max_files > 0 and len(items) > settings.summarizer_max_files:
+        deferred = [fname for fname, _ in items[settings.summarizer_max_files :]]
+        items = items[: settings.summarizer_max_files]
+        logger.warning(
+            "Per-run file cap hit; deferring excess files.",
+            cap=settings.summarizer_max_files,
+            deferred=len(deferred),
+        )
+
     is_changelog = _CHANGELOG_PATTERN.search
-    changelog_files = {f: c for f, c in per_file.items() if is_changelog(f)}
-    doc_files = {f: c for f, c in per_file.items() if not is_changelog(f)}
 
     logger.info(
         "Starting per-file summarization.",
-        changelog_files=len(changelog_files),
-        doc_files=len(doc_files),
+        changelog_files=sum(1 for f, _ in items if is_changelog(f)),
+        doc_files=sum(1 for f, _ in items if not is_changelog(f)),
+        deferred=len(deferred),
     )
 
-    # Fan out — summarize all files in parallel
-    try:
-        tasks = [
-            _summarize_file(fname, chunk, client, map_model)
-            for fname, chunk in per_file.items()
-        ]
-        results = await asyncio.gather(*tasks)
-    except anthropic.APIError as exc:
-        logger.error(
-            "Summarizer API call failed during fan-out, using fallback.",
-            error=str(exc),
-            status_code=getattr(exc, "status_code", None),
+    # Fan out — summarize files with bounded concurrency so a large diff drains
+    # as a throttled queue instead of bursting past the org rate limit.
+    tasks = [
+        _summarize_file(
+            fname, chunk, client, map_model, settings.summarizer_max_input_chars
         )
-        return _fallback_summary(diff, reason="API error")
+        for fname, chunk in items
+    ]
+    results = await bounded_gather(settings.summarizer_max_concurrency, *tasks)
 
-    file_summaries: dict[str, str] = dict(results)
+    # Each result is a (filename, summary) tuple; a stray exception (anything
+    # not already caught inside _summarize_file) degrades to a stub.
+    file_summaries: dict[str, str] = {}
+    for (fname, _chunk), result in zip(items, results, strict=True):
+        if isinstance(result, BaseException):
+            logger.warning(
+                "Per-file summarization raised unexpectedly, using stub.",
+                file=fname,
+                error=str(result),
+            )
+            file_summaries[fname] = _stub_summary(fname)
+        else:
+            summarized_name, summary = result
+            file_summaries[summarized_name] = summary
 
     changelog_summaries = {f: s for f, s in file_summaries.items() if is_changelog(f)}
     doc_summaries = {f: s for f, s in file_summaries.items() if not is_changelog(f)}
@@ -185,6 +240,12 @@ async def summarize_diff(diff: DiffResult, settings: Settings) -> str:
             status_code=getattr(exc, "status_code", None),
         )
         return _fallback_summary(diff, reason="API error")
+
+    if deferred:
+        deferred_list = "\n".join(f"- `{f}`" for f in deferred)
+        synthesis_parts.append(
+            f"**Deferred (rate-limit cap): {len(deferred)} file(s)**\n{deferred_list}"
+        )
 
     return "\n\n---\n\n".join(synthesis_parts)
 

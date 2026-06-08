@@ -39,6 +39,19 @@ class Settings(BaseSettings):
     # Claude API
     anthropic_api_key: str = ""
 
+    # Summarizer fan-out throttling — keeps the per-file Haiku map step under the
+    # org rate limit and resilient to a single bad file (see issue #4).
+    # Semaphore bound on in-flight fan-out calls (summarizer + drift map step).
+    summarizer_max_concurrency: int = 3
+    # Passed to AsyncAnthropic(max_retries=...); the SDK does exponential backoff
+    # and honors `retry-after` on 429/529.
+    summarizer_max_retries: int = 5
+    # Per-run cap on files summarized; 0 = unlimited. Excess files are deferred.
+    summarizer_max_files: int = 0
+    # Per-file input truncation budget (~120k tokens at ~4 chars/tok — headroom
+    # under the 200k Haiku context window).
+    summarizer_max_input_chars: int = 480_000
+
     # Source URLs
     docs_base_url: str = "https://code.claude.com/docs"  # Claude Code docs
     # Anthropic API docs — index lives at the domain root (/llms.txt); page URLs

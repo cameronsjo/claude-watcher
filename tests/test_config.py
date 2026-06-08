@@ -81,3 +81,14 @@ def test_email_disabled_when_no_host() -> None:
         _env_file=None,  # type: ignore[call-arg]
     )
     assert settings.email_enabled is False
+
+
+def test_summarizer_throttle_defaults() -> None:
+    """The fan-out throttle knobs carry safe defaults."""
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    assert settings.summarizer_max_concurrency == 3
+    assert settings.summarizer_max_retries == 5
+    assert settings.summarizer_max_files == 0
+    assert settings.summarizer_max_input_chars == 480_000

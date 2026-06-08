@@ -8,6 +8,7 @@ import httpx
 import structlog
 import yaml
 
+from claude_watcher.concurrency import bounded_gather
 from claude_watcher.config import Settings
 from claude_watcher.differ import DiffResult
 
@@ -171,26 +172,30 @@ async def check_drift(diff: DiffResult, settings: Settings) -> str | None:
         logger.info("Drift check: no fetchable pairs remain after content loading.")
         return None
 
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    client = anthropic.AsyncAnthropic(
+        api_key=settings.anthropic_api_key,
+        max_retries=settings.summarizer_max_retries,
+    )
     map_model = "claude-haiku-4-5-20251001"
     reduce_model = settings.drift_review_model or "claude-sonnet-4-6"
 
-    # MAP step — fan out per pair
-    try:
-        map_tasks = [
-            _check_pair(
-                page, upstream_content, url, ecosystem_content, client, map_model
+    # MAP step — fan out per pair with bounded concurrency. A failed pair is
+    # skipped rather than aborting the whole check (return_exceptions=True).
+    map_tasks = [
+        _check_pair(page, upstream_content, url, ecosystem_content, client, map_model)
+        for page, upstream_content, url, ecosystem_content in pairs
+    ]
+    raw_results = await bounded_gather(settings.summarizer_max_concurrency, *map_tasks)
+    map_results = []
+    for result in raw_results:
+        if isinstance(result, BaseException):
+            logger.warning(
+                "Drift pair check failed, skipping pair.",
+                error=str(result),
+                status_code=getattr(result, "status_code", None),
             )
-            for page, upstream_content, url, ecosystem_content in pairs
-        ]
-        map_results = await asyncio.gather(*map_tasks)
-    except anthropic.APIError as exc:
-        logger.error(
-            "Drift check API error during map step, skipping.",
-            error=str(exc),
-            status_code=getattr(exc, "status_code", None),
-        )
-        return None
+            continue
+        map_results.append(result)
 
     # Filter out NO DRIFT pairs before reduce
     drift_findings = [

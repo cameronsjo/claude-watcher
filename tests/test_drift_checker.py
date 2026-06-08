@@ -385,3 +385,98 @@ async def test_new_pages_also_trigger_drift_check(tmp_path: Path, httpx_mock) ->
 
     assert result is not None
     assert "OUTDATED" in result
+
+
+# ---------------------------------------------------------------------------
+# Client is built with the configured retry budget (issue #4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_drift_client_built_with_max_retries(tmp_path: Path, httpx_mock) -> None:
+    """AsyncAnthropic is constructed with max_retries from settings."""
+    mappings_path = tmp_path / "drift-mappings.yaml"
+    _write_mappings(
+        mappings_path,
+        "docs__en__hooks.md:\n  - https://raw.example.com/hooks-skill.md\n",
+    )
+    _write_snapshot(tmp_path, "docs__en__hooks.md", "# Hooks\nContent.")
+    httpx_mock.add_response(
+        url="https://raw.example.com/hooks-skill.md", text="# Skill\nContent."
+    )
+
+    settings = _settings(tmp_path, drift_mappings_file=mappings_path)
+    diff = DiffResult(modified_pages=["docs__en__hooks.md"])
+
+    map_message = MagicMock()
+    map_message.content = [MagicMock(text="NO DRIFT")]
+    mock_anthropic = AsyncMock()
+    mock_anthropic.messages.create = AsyncMock(return_value=map_message)
+
+    with patch(
+        "claude_watcher.drift_checker.anthropic.AsyncAnthropic",
+        return_value=mock_anthropic,
+    ) as mock_cls:
+        await check_drift(diff, settings)
+
+    mock_cls.assert_called_once_with(api_key="sk-ant-test", max_retries=5)
+
+
+# ---------------------------------------------------------------------------
+# Per-pair isolation: one failed pair is skipped; others still produce a digest
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_one_bad_pair_does_not_abort_others(tmp_path: Path, httpx_mock) -> None:
+    """A 429 on one pair skips it; the surviving pair's drift still synthesizes."""
+    import anthropic as anthropic_lib
+
+    mappings_path = tmp_path / "drift-mappings.yaml"
+    _write_mappings(
+        mappings_path,
+        "docs__en__good.md:\n  - https://raw.example.com/good-skill.md\n"
+        "docs__en__bad.md:\n  - https://raw.example.com/bad-skill.md\n",
+    )
+    _write_snapshot(tmp_path, "docs__en__good.md", "# Good\nContent.")
+    _write_snapshot(tmp_path, "docs__en__bad.md", "# Bad\nContent.")
+    httpx_mock.add_response(
+        url="https://raw.example.com/good-skill.md", text="# Good skill\nContent."
+    )
+    httpx_mock.add_response(
+        url="https://raw.example.com/bad-skill.md", text="# Bad skill\nContent."
+    )
+
+    settings = _settings(tmp_path, drift_mappings_file=mappings_path)
+    diff = DiffResult(modified_pages=["docs__en__good.md", "docs__en__bad.md"])
+
+    good_map = MagicMock()
+    good_map.content = [MagicMock(text="- good page drifted")]
+    reduce_message = MagicMock()
+    reduce_message.content = [MagicMock(text="WRONG: good page drifted")]
+    reduce_message.usage = MagicMock(input_tokens=10, output_tokens=5)
+
+    async def create(**kwargs):
+        content = kwargs["messages"][0]["content"]
+        # Map (per-pair) calls use Haiku; reduce (synthesis) uses Sonnet.
+        if "haiku" in kwargs["model"]:
+            if "docs__en__bad.md" in content:
+                raise anthropic_lib.APIStatusError(
+                    "rate limited",
+                    response=MagicMock(status_code=429, headers={}),
+                    body=None,
+                )
+            return good_map
+        return reduce_message
+
+    mock_anthropic = MagicMock()
+    mock_anthropic.messages.create = create
+
+    with patch(
+        "claude_watcher.drift_checker.anthropic.AsyncAnthropic",
+        return_value=mock_anthropic,
+    ):
+        result = await check_drift(diff, settings)
+
+    assert result is not None
+    assert "WRONG" in result

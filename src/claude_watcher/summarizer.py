@@ -59,14 +59,27 @@ Keep the total response under {max_chars} characters."""
 # The character target handed to the model, derived from the token budget so
 # the two cannot drift. The old prompt asked for 3500 characters against a
 # 1024-token budget — the instruction and the cap disagreed, and the cap won,
-# mid-sentence. Three chars per token is deliberately conservative: the
-# instruction must never ask for more than the budget can emit.
-_CHARS_PER_TOKEN = 3
+# mid-sentence. Asking for LESS than the budget can emit is the safe direction:
+# the model finishes before it is cut off.
+#
+# Measured against the local preset rather than assumed. Digest-shaped output
+# (prose bullets referencing settings and flags) ran 3.81 and 3.98 chars/token,
+# but an identifier-dense sample — repeated `--flag-N` / `WATCHER_KEY_N` tokens
+# with little prose between them — ran 2.22. Subword splitting on
+# snake_case/camelCase and multi-byte glyphs is what pulls it down, and a digest
+# is exactly the content that is dense in both. So the constant is floored at
+# the WORST observation, not the typical one: at 4 it would over-ask on the very
+# input this bug appears on, which is the original defect at a higher threshold.
+_CHARS_PER_TOKEN = 2
 
 
 def _char_target(max_tokens: int) -> int:
-    """Characters the model can actually produce within `max_tokens`."""
-    return max_tokens * _CHARS_PER_TOKEN
+    """Characters the model can actually produce within `max_tokens`.
+
+    Clamped at 1 token so a misconfigured budget cannot render the instruction
+    "Keep the total response under 0 characters".
+    """
+    return max(1, max_tokens) * _CHARS_PER_TOKEN
 
 
 # --- Triviality filter -----------------------------------------------------

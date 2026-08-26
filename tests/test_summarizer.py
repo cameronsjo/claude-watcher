@@ -10,6 +10,7 @@ from claude_watcher.config import Settings
 from claude_watcher.differ import DiffResult
 from claude_watcher.summarizer import (
     _CHANGELOG_SYNTHESIS_PROMPT,
+    _CHARS_PER_TOKEN,
     _FILE_SUMMARY_PROMPT,
     _SYNTHESIS_PROMPT,
     _char_target,
@@ -581,15 +582,29 @@ def test_reduce_prompts_format_cleanly() -> None:
         assert "{" not in rendered and "}" not in rendered
 
 
-def test_char_target_stays_under_what_the_budget_can_emit() -> None:
-    """Three chars per token is deliberately conservative.
+# Worst chars-per-token observed against the local preset. Digest-shaped prose
+# ran 3.81-3.98; an identifier-dense sample ran this low. Re-measure before
+# raising `_CHARS_PER_TOKEN` — the whole point is that it is floored on
+# measurement, not on a general-prose average.
+_WORST_OBSERVED_CHARS_PER_TOKEN = 2.22
 
-    Real text runs closer to 4 chars/token, so the instruction always asks for
-    less than the cap allows. Asking for more is how a digest ends mid-sentence
-    while obeying its own prompt.
+
+def test_char_target_never_exceeds_the_worst_measured_ratio() -> None:
+    """The instruction must not ask for more than the budget can emit.
+
+    A digest is dense in identifiers and markdown syntax, which tokenize worse
+    than prose — so the constant is floored on the worst observation. Asking
+    for more is the original bug at a higher threshold.
     """
-    assert _char_target(1024) == 3072
-    assert _char_target(4096) < 4096 * 4
+    assert _CHARS_PER_TOKEN <= _WORST_OBSERVED_CHARS_PER_TOKEN
+    for budget in (512, 1024, 2048, 4096):
+        assert _char_target(budget) <= budget * _WORST_OBSERVED_CHARS_PER_TOKEN
+
+
+def test_char_target_clamps_a_zero_budget() -> None:
+    """A misconfigured budget must not render "under 0 characters"."""
+    assert _char_target(0) > 0
+    assert _char_target(-5) > 0
 
 
 @pytest.mark.asyncio
@@ -612,5 +627,5 @@ async def test_the_char_target_reaches_the_model() -> None:
     with _mock_openai(create):
         await summarize_diff(diff, settings)
 
-    assert any("6000 characters" in s for s in systems), "doc target"
-    assert any("1500 characters" in s for s in systems), "changelog target"
+    assert any("4000 characters" in s for s in systems), "doc target"
+    assert any("1000 characters" in s for s in systems), "changelog target"

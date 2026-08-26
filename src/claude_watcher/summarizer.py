@@ -46,14 +46,28 @@ Under each category, use bullet points (`-`) with concise descriptions. \
 Reference exact setting names, hook types, API changes, or config keys.
 Flag anything a plugin developer or security engineer must act on with ⚠️.
 Skip categories with no relevant changes.
-Keep the total response under 3500 characters."""
+Keep the total response under {max_chars} characters."""
 
 # Changelog synthesis prompt — release-note style, not categorized
 _CHANGELOG_SYNTHESIS_PROMPT = """\
 You are summarizing Claude Code changelog entries.
 Write a concise release summary: one TL;DR sentence, then bullet points for
 each notable change. Group related items. Reference exact version numbers,
-flags, and setting names. Skip minor wording fixes."""
+flags, and setting names. Skip minor wording fixes.
+Keep the total response under {max_chars} characters."""
+
+# The character target handed to the model, derived from the token budget so
+# the two cannot drift. The old prompt asked for 3500 characters against a
+# 1024-token budget — the instruction and the cap disagreed, and the cap won,
+# mid-sentence. Three chars per token is deliberately conservative: the
+# instruction must never ask for more than the budget can emit.
+_CHARS_PER_TOKEN = 3
+
+
+def _char_target(max_tokens: int) -> int:
+    """Characters the model can actually produce within `max_tokens`."""
+    return max_tokens * _CHARS_PER_TOKEN
+
 
 # --- Triviality filter -----------------------------------------------------
 # Inline markdown link: `[text](target)`, with an optional `"title"`. Anchored
@@ -302,9 +316,13 @@ async def summarize_diff(diff: DiffResult, settings: Settings) -> str:
     ) -> str | None:
         nonlocal attempted, succeeded
         attempted += 1
+        # Format here, not at the call sites: `_reduce` is the one place that
+        # holds both the prompt and its budget, so the instruction cannot drift
+        # from the cap. The old prompt asked for 3500 characters against a
+        # 1024-token budget — they disagreed, and the cap won, mid-sentence.
         try:
             text, input_tokens, output_tokens = await llm.complete(
-                prompt,
+                prompt.format(max_chars=_char_target(max_tokens)),
                 block,
                 max_tokens,
                 model=settings.llm_reduce_model,

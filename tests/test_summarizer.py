@@ -9,7 +9,10 @@ import pytest
 from claude_watcher.config import Settings
 from claude_watcher.differ import DiffResult
 from claude_watcher.summarizer import (
+    _CHANGELOG_SYNTHESIS_PROMPT,
     _FILE_SUMMARY_PROMPT,
+    _SYNTHESIS_PROMPT,
+    _char_target,
     _fallback_summary,
     _is_trivial_hunk,
     summarize_diff,
@@ -558,3 +561,56 @@ async def test_all_synthesis_failing_falls_back_to_the_page_list() -> None:
 
     assert "2 page(s) changed" in result
     assert "guide.md" in result
+
+
+# ---------------------------------------------------------------------------
+# The prompt's character target derives from the token budget
+# ---------------------------------------------------------------------------
+
+
+def test_reduce_prompts_format_cleanly() -> None:
+    """Both reduce prompts must survive `.format(max_chars=...)`.
+
+    `_reduce` formats whatever prompt it is handed, so a future prompt
+    containing a literal brace would raise at runtime — on the reduce step, in
+    production, after every map call has already been paid for.
+    """
+    for prompt in (_SYNTHESIS_PROMPT, _CHANGELOG_SYNTHESIS_PROMPT):
+        rendered = prompt.format(max_chars=1234)
+        assert "1234 characters" in rendered
+        assert "{" not in rendered and "}" not in rendered
+
+
+def test_char_target_stays_under_what_the_budget_can_emit() -> None:
+    """Three chars per token is deliberately conservative.
+
+    Real text runs closer to 4 chars/token, so the instruction always asks for
+    less than the cap allows. Asking for more is how a digest ends mid-sentence
+    while obeying its own prompt.
+    """
+    assert _char_target(1024) == 3072
+    assert _char_target(4096) < 4096 * 4
+
+
+@pytest.mark.asyncio
+async def test_the_char_target_reaches_the_model() -> None:
+    """The rendered prompt carries the number derived from the live budget."""
+    settings = _settings(llm_reduce_max_tokens=2000, llm_changelog_max_tokens=500)
+    diff = DiffResult(
+        modified_pages=["CHANGELOG.md", "guide.md"],
+        raw_diff=_raw_diff("CHANGELOG.md", "guide.md"),
+    )
+
+    systems: list[str] = []
+
+    async def create(**kwargs):
+        if _is_map(kwargs):
+            return _map_message()
+        systems.append(kwargs["messages"][0]["content"])
+        return _reduce_message()
+
+    with _mock_openai(create):
+        await summarize_diff(diff, settings)
+
+    assert any("6000 characters" in s for s in systems), "doc target"
+    assert any("1500 characters" in s for s in systems), "changelog target"

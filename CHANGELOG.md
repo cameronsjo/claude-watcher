@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The synthesis prompts' character target now derives from the token budget
+  instead of being hardcoded. The doc prompt asked for "under 3500 characters"
+  against a 1024-token cap that could not emit that much — the instruction and
+  the cap disagreed, and the cap won, mid-sentence. The changelog prompt had no
+  target at all, so `max_tokens` was its only bound. Both are now rendered from
+  the live budget at the one place that holds both.
 - Digests were ending mid-sentence, and sometimes arriving as a `---` above
   nothing. The reduce steps carried `max_tokens` of 1024 and 512, sized against
   a provider that did not emit reasoning tokens; the local model bills its

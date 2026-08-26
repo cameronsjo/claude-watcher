@@ -19,6 +19,19 @@ logger = structlog.get_logger()
 # importing `openai` themselves.
 LLMError = openai.OpenAIError
 
+
+class EmptyCompletionError(LLMError):
+    """The model returned no content — usually its whole budget went to reasoning.
+
+    A reasoning model bills its thinking against `max_tokens` but returns it in
+    a separate `reasoning_content` field, so a budget that is merely tight
+    yields `content == ""` with no error and `finish_reason == "length"`.
+    Callers degrade on this the same way they degrade on a transport failure;
+    the alternative is shipping an empty section, which reads as a real digest
+    with nothing in it.
+    """
+
+
 # Summarization is an extraction task, not a creative one. No call site set a
 # temperature before, so all five silently inherited the previous provider's
 # default of 1.0 — that is not a dependency worth carrying to a new backend.
@@ -73,6 +86,15 @@ async def complete(
     """
     client = _get_client(settings)
 
+    # A reasoning model spends `max_tokens` on thinking it returns in a separate
+    # field, so a summarization prompt can burn its whole budget and emit
+    # nothing. Summarizing a diff is extraction, not deduction — there is
+    # nothing here worth thinking about. Sent through `extra_body` because the
+    # value is provider-specific and the SDK's own typing rejects "none".
+    extra_body: dict = {}
+    if settings.llm_reasoning_effort:
+        extra_body["reasoning_effort"] = settings.llm_reasoning_effort
+
     try:
         response = await client.chat.completions.create(
             model=model,
@@ -82,6 +104,7 @@ async def complete(
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            extra_body=extra_body,
         )
     # NotFoundError and RateLimitError are both APIStatusError subclasses, so
     # they must be caught first. A 404 from a mistyped or unrouted model id is
@@ -119,8 +142,38 @@ async def complete(
         )
         raise
 
-    text = response.choices[0].message.content or ""
+    choice = response.choices[0]
+    text = choice.message.content or ""
     usage = response.usage
+
+    # `finish_reason == "length"` is the model saying it was cut off, and it is
+    # the ONLY signal that a digest ends mid-sentence — the response is a
+    # well-formed 200 either way. Ignoring it shipped two truncated digests to
+    # Discord before anyone noticed the last sentence just stopped.
+    if choice.finish_reason == "length":
+        logger.warning(
+            "LLM output hit max_tokens — this response is cut off mid-text.",
+            model=model,
+            max_tokens=max_tokens,
+            content_chars=len(text),
+        )
+
+    if not text.strip():
+        # Distinct from a transport failure and worth its own message: the call
+        # succeeded, the tokens were spent, and nothing came back.
+        logger.error(
+            "LLM returned an empty completion — the whole budget went to "
+            "reasoning or the model emitted nothing.",
+            model=model,
+            max_tokens=max_tokens,
+            finish_reason=choice.finish_reason,
+            output_tokens=usage.completion_tokens if usage else 0,
+        )
+        raise EmptyCompletionError(
+            f"{model} returned no content "
+            f"(finish_reason={choice.finish_reason}, max_tokens={max_tokens})"
+        )
+
     input_tokens = usage.prompt_tokens if usage else 0
     output_tokens = usage.completion_tokens if usage else 0
     return text, input_tokens, output_tokens

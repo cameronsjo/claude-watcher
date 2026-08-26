@@ -47,6 +47,22 @@ class Settings(BaseSettings):
     # tiers across two local ids would force a full model reload mid-run.
     llm_map_model: str = "local/Qwen3.8-27B-Heretic-RVN-Q4_K_M"
     llm_reduce_model: str = "local/Qwen3.8-27B-Heretic-RVN-Q4_K_M"
+    # Sent as `reasoning_effort` when non-empty. A reasoning model bills its
+    # thinking against max_tokens but returns it in a separate field, so a
+    # summarization call can spend its entire budget and return "". Set to ""
+    # for a backend that rejects the parameter.
+    llm_reasoning_effort: str = "none"
+
+    # Output budgets. These are the model's whole allowance, thinking included
+    # — the previous 1024/512 pair was set against a provider that did not
+    # think, and under a reasoning model it cut digests off mid-sentence and
+    # sometimes emptied them entirely. The local preset allows n-predict 32768.
+    # Per-file map summary.
+    llm_map_max_tokens: int = 1024
+    # Cross-file synthesis — the longest output this service produces.
+    llm_reduce_max_tokens: int = 4096
+    # Changelog synthesis: release-note style, shorter than the doc digest.
+    llm_changelog_max_tokens: int = 2048
 
     # Summarizer fan-out throttling — keeps the per-file map step under the
     # single-process llama-server's capacity and resilient to a single bad file

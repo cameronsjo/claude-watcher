@@ -6,7 +6,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from claude_watcher.config import Settings
-from claude_watcher.llm import complete, fit_sections
+from claude_watcher.llm import (
+    EmptyCompletionError,
+    LLMError,
+    complete,
+    fit_sections,
+)
 
 
 def _sections(n: int, body_chars: int = 100) -> list[str]:
@@ -104,3 +109,102 @@ def test_secret_key_does_not_render_in_settings_repr() -> None:
     )
     assert "gw-super-secret" not in repr(settings)
     assert settings.llm_api_key.get_secret_value() == "gw-super-secret"
+
+
+# ---------------------------------------------------------------------------
+# Truncation and empty completions — a reasoning model spends max_tokens on
+# thinking it returns in a separate field, so both are routine, not exotic.
+# ---------------------------------------------------------------------------
+
+
+def _choice(content, finish_reason="stop"):
+    response = MagicMock()
+    response.choices = [
+        MagicMock(message=MagicMock(content=content), finish_reason=finish_reason)
+    ]
+    response.usage = MagicMock(prompt_tokens=10, completion_tokens=64)
+    return response
+
+
+def _patched(response):
+    async def create(**kwargs):
+        create.kwargs = kwargs
+        return response
+
+    client = MagicMock()
+    client.chat.completions.create = create
+    return patch("claude_watcher.llm.openai.AsyncOpenAI", return_value=client), create
+
+
+@pytest.mark.asyncio
+async def test_empty_completion_raises_rather_than_returning_blank() -> None:
+    """An empty completion must degrade, not ship an empty digest section.
+
+    Returning "" put a bare `---` above nothing in a delivered Discord digest:
+    the model spent its whole budget on reasoning and emitted no content, and
+    the call still came back 200.
+    """
+    settings = Settings(llm_api_key="k", _env_file=None)  # type: ignore[call-arg]
+    patcher, _ = _patched(_choice("", finish_reason="length"))
+
+    with patcher:
+        with pytest.raises(EmptyCompletionError):
+            await complete("sys", "user", 64, model="local/x", settings=settings)
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_completion_also_raises() -> None:
+    settings = Settings(llm_api_key="k", _env_file=None)  # type: ignore[call-arg]
+    patcher, _ = _patched(_choice("   \n  "))
+
+    with patcher:
+        with pytest.raises(EmptyCompletionError):
+            await complete("sys", "user", 64, model="local/x", settings=settings)
+
+
+@pytest.mark.asyncio
+async def test_empty_completion_error_is_an_llm_error() -> None:
+    """Callers catch LLMError; the new type must not slip past their except."""
+    assert issubclass(EmptyCompletionError, LLMError)
+
+
+@pytest.mark.asyncio
+async def test_truncated_output_is_returned_but_warned_about() -> None:
+    """A cut-off response is still usable — it just must not pass silently."""
+    settings = Settings(llm_api_key="k", _env_file=None)  # type: ignore[call-arg]
+    patcher, _ = _patched(_choice("half a sentence and then", finish_reason="length"))
+
+    with patcher, patch("claude_watcher.llm.logger") as log:
+        text, _, _ = await complete("s", "u", 64, model="local/x", settings=settings)
+
+    assert text == "half a sentence and then"
+    warned = [c for c in log.warning.call_args_list if "max_tokens" in str(c)]
+    assert warned, "truncation must be logged — it is the only signal it happened"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_is_sent_when_configured() -> None:
+    settings = Settings(llm_api_key="k", _env_file=None)  # type: ignore[call-arg]
+    assert settings.llm_reasoning_effort == "none"
+    patcher, create = _patched(_choice("ok"))
+
+    with patcher:
+        await complete("s", "u", 64, model="local/x", settings=settings)
+
+    assert create.kwargs["extra_body"] == {"reasoning_effort": "none"}
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_is_omitted_when_blank() -> None:
+    """A backend that rejects the parameter is one setting away."""
+    settings = Settings(
+        llm_api_key="k",
+        llm_reasoning_effort="",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    patcher, create = _patched(_choice("ok"))
+
+    with patcher:
+        await complete("s", "u", 64, model="local/x", settings=settings)
+
+    assert create.kwargs["extra_body"] == {}

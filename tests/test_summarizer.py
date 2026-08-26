@@ -499,3 +499,62 @@ async def test_unreachable_gateway_degrades_to_file_list() -> None:
 
     assert "1 page(s) changed" in result
     assert "doc.md" in result
+
+
+# ---------------------------------------------------------------------------
+# An empty synthesis part must not render as a rule above nothing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_empty_doc_synthesis_does_not_leave_a_leading_rule() -> None:
+    """A blank doc section must not ship as `---` with nothing above it.
+
+    Observed live: the doc reduce spent its whole budget on reasoning, returned
+    "", and the delivered digest opened with a horizontal rule.
+    """
+    settings = _settings()
+    diff = DiffResult(
+        modified_pages=["CHANGELOG.md", "guide.md"],
+        raw_diff=_raw_diff("CHANGELOG.md", "guide.md"),
+    )
+
+    async def create(**kwargs):
+        if _is_map(kwargs):
+            return _map_message()
+        system = kwargs["messages"][0]["content"]
+        if "digest writer" in system:
+            # The doc synthesis comes back empty, as it did in production.
+            raise openai.OpenAIError("empty completion")
+        return _reduce_message("RELEASE NOTES")
+
+    with _mock_openai(create):
+        result = await summarize_diff(diff, settings)
+
+    assert not result.lstrip().startswith("---")
+    assert "\n\n---\n\n---" not in result
+    # The changelog synthesis succeeded and must survive the doc failure — one
+    # shared try/except previously discarded it and fell back to the page list.
+    assert "RELEASE NOTES" in result
+    assert "page(s) changed" not in result
+
+
+@pytest.mark.asyncio
+async def test_all_synthesis_failing_falls_back_to_the_page_list() -> None:
+    """A partial failure keeps what worked; a total one degrades."""
+    settings = _settings()
+    diff = DiffResult(
+        modified_pages=["CHANGELOG.md", "guide.md"],
+        raw_diff=_raw_diff("CHANGELOG.md", "guide.md"),
+    )
+
+    async def create(**kwargs):
+        if _is_map(kwargs):
+            return _map_message()
+        raise openai.OpenAIError("both reduces down")
+
+    with _mock_openai(create):
+        result = await summarize_diff(diff, settings)
+
+    assert "2 page(s) changed" in result
+    assert "guide.md" in result

@@ -112,7 +112,7 @@ async def _check_pair(
     text, _input_tokens, _output_tokens = await llm.complete(
         _MAP_PROMPT,
         user_message,
-        512,
+        settings.llm_map_max_tokens,
         model=map_model,
         settings=settings,
     )
@@ -231,7 +231,7 @@ async def check_drift(diff: DiffResult, settings: Settings) -> str | None:
         text, input_tokens, output_tokens = await llm.complete(
             _REDUCE_PROMPT,
             reduce_input,
-            1024,
+            settings.llm_reduce_max_tokens,
             model=reduce_model,
             settings=settings,
         )

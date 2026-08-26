@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. Superseded in part by [ADR 0002](0002-summarize-on-the-estate-gateway.md) — summarization moved off the Anthropic Console API onto the estate LLM gateway.
 
 ## Context
 
@@ -13,7 +13,7 @@ Claude Code releases multiple times per week with no structured change notificat
 - **State store**: Git repo itself — snapshots committed after each run, no database
 - **Source discovery**: Auto-fetch page list from `code.claude.com/docs/llms.txt`
 - **Scheduling**: APScheduler in-process with two tiers (changelog hourly during peak, full docs daily)
-- **Summarization**: Claude API with categorized system prompt
+- **Summarization**: Claude API with categorized system prompt *(superseded by ADR 0002)*
 - **Delivery**: Discord webhook + SMTP email, independent failure domains
 - **Container**: Docker, non-root, health endpoint
 
@@ -21,4 +21,4 @@ Claude Code releases multiple times per week with no structured change notificat
 
 - Git as state store means no database dependencies but requires git in the container image
 - Two-tier polling balances freshness against being respectful of doc site resources
-- Claude API dependency for summarization adds cost but provides high-quality categorized digests
+- Claude API dependency for summarization adds cost but provides high-quality categorized digests *(superseded by ADR 0002: the cost is gone, the quality is lower)*

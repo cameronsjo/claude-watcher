@@ -5,7 +5,7 @@ description = "Self-hosted documentation watcher for Claude Code — polls, diff
 requires-python = ">=3.13"
 dependencies = [
     "httpx>=0.28",
-    "anthropic>=0.52",
+    "openai>=3.3,<4",
     "aiosmtplib>=3.0",
     "structlog>=25.1",
     "apscheduler>=3.11,<4",

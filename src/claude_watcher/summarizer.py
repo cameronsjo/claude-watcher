@@ -193,7 +193,7 @@ async def _summarize_file(
         text, _input_tokens, _output_tokens = await llm.complete(
             _FILE_SUMMARY_PROMPT,
             user_content,
-            512,
+            settings.llm_map_max_tokens,
             model=model,
             settings=settings,
         )
@@ -290,65 +290,83 @@ async def summarize_diff(diff: DiffResult, settings: Settings) -> str:
     changelog_summaries = {f: s for f, s in file_summaries.items() if is_changelog(f)}
     doc_summaries = {f: s for f, s in file_summaries.items() if not is_changelog(f)}
 
-    # Reduce — synthesize each group
+    # Reduce — synthesize each group. The two groups degrade INDEPENDENTLY: one
+    # shared try/except meant a failed doc synthesis also discarded a changelog
+    # digest that had already been produced and paid for.
     synthesis_parts: list[str] = []
+    attempted = 0
+    succeeded = 0
 
-    try:
-        if doc_summaries:
-            page_meta: list[str] = []
-            if diff.new_pages:
-                new_list = "\n".join(f"  - {p}" for p in diff.new_pages)
-                page_meta.append(f"NEW PAGES:\n{new_list}")
-            if diff.removed_pages:
-                removed_list = "\n".join(f"  - {p}" for p in diff.removed_pages)
-                page_meta.append(f"REMOVED PAGES:\n{removed_list}")
-
-            doc_message = llm.fit_sections(
-                [f"### {fname}\n{summary}" for fname, summary in doc_summaries.items()],
-                settings.summarizer_max_reduce_chars,
-                prefix="\n\n".join(page_meta),
-            )
+    async def _reduce(
+        label: str, prompt: str, block: str, max_tokens: int
+    ) -> str | None:
+        nonlocal attempted, succeeded
+        attempted += 1
+        try:
             text, input_tokens, output_tokens = await llm.complete(
-                _SYNTHESIS_PROMPT,
-                doc_message,
-                1024,
+                prompt,
+                block,
+                max_tokens,
                 model=settings.llm_reduce_model,
                 settings=settings,
             )
-            synthesis_parts.append(text)
-            logger.info(
-                "Synthesized doc summary.",
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
+        except LLMError as exc:
+            logger.error(
+                "Synthesis failed for one group; the others still ship.",
+                group=label,
+                error=str(exc),
+                status_code=getattr(exc, "status_code", None),
             )
-
-        if changelog_summaries:
-            changelog_block = llm.fit_sections(
-                [
-                    f"### {fname}\n{summary}"
-                    for fname, summary in changelog_summaries.items()
-                ],
-                settings.summarizer_max_reduce_chars,
-            )
-            text, input_tokens, output_tokens = await llm.complete(
-                _CHANGELOG_SYNTHESIS_PROMPT,
-                changelog_block,
-                512,
-                model=settings.llm_reduce_model,
-                settings=settings,
-            )
-            synthesis_parts.append("**Changelog**\n" + text)
-            logger.info(
-                "Synthesized changelog summary.",
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-            )
-    except LLMError as exc:
-        logger.error(
-            "Summarizer API call failed during synthesis, using fallback.",
-            error=str(exc),
-            status_code=getattr(exc, "status_code", None),
+            return None
+        succeeded += 1
+        logger.info(
+            f"Synthesized {label} summary.",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
+        return text
+
+    if doc_summaries:
+        page_meta: list[str] = []
+        if diff.new_pages:
+            new_list = "\n".join(f"  - {p}" for p in diff.new_pages)
+            page_meta.append(f"NEW PAGES:\n{new_list}")
+        if diff.removed_pages:
+            removed_list = "\n".join(f"  - {p}" for p in diff.removed_pages)
+            page_meta.append(f"REMOVED PAGES:\n{removed_list}")
+
+        doc_message = llm.fit_sections(
+            [f"### {fname}\n{summary}" for fname, summary in doc_summaries.items()],
+            settings.summarizer_max_reduce_chars,
+            prefix="\n\n".join(page_meta),
+        )
+        text = await _reduce(
+            "doc", _SYNTHESIS_PROMPT, doc_message, settings.llm_reduce_max_tokens
+        )
+        if text:
+            synthesis_parts.append(text)
+
+    if changelog_summaries:
+        changelog_block = llm.fit_sections(
+            [
+                f"### {fname}\n{summary}"
+                for fname, summary in changelog_summaries.items()
+            ],
+            settings.summarizer_max_reduce_chars,
+        )
+        text = await _reduce(
+            "changelog",
+            _CHANGELOG_SYNTHESIS_PROMPT,
+            changelog_block,
+            settings.llm_changelog_max_tokens,
+        )
+        if text:
+            synthesis_parts.append("**Changelog**\n" + text)
+
+    # Everything we tried failed — there is no digest to send, so degrade to the
+    # page list rather than delivering an empty message. A PARTIAL failure keeps
+    # what worked; only a total one falls back.
+    if attempted and not succeeded:
         return _fallback_summary(diff, reason="API error")
 
     if deferred:
@@ -357,7 +375,10 @@ async def summarize_diff(diff: DiffResult, settings: Settings) -> str:
             f"**Deferred (rate-limit cap): {len(deferred)} file(s)**\n{deferred_list}"
         )
 
-    return "\n\n---\n\n".join(synthesis_parts)
+    # Drop empties: a section that came back blank would otherwise render as a
+    # horizontal rule with nothing above it. `llm.complete` now raises instead
+    # of returning "", so this is the belt to that suspenders.
+    return "\n\n---\n\n".join(p for p in synthesis_parts if p.strip())
 
 
 def _fallback_summary(

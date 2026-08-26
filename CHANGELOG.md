@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Digests no longer end mid-sentence. The reduce steps carried `max_tokens` of
+  1024 and 512, sized against a provider that did not emit reasoning tokens. The
+  local model bills its thinking against the same budget but returns it in a
+  separate `reasoning_content` field, so the visible text was cut off — and
+  sometimes the entire budget went to thinking and the digest section came back
+  empty, rendering as a `---` above nothing.
+- `finish_reason == "length"` is now logged. It is the only signal that a
+  response was truncated; the HTTP call is a well-formed 200 either way.
+- An empty completion raises `EmptyCompletionError` instead of returning `""`.
+- The doc and changelog syntheses degrade **independently**. One shared
+  `try`/`except` meant a failed doc synthesis also discarded a changelog digest
+  that had already been produced. Only a total failure falls back to the page
+  list now.
+
+### Added
+
+- `WATCHER_LLM_REASONING_EFFORT` (default `none`) — sent as `reasoning_effort`.
+  Summarizing a diff is extraction, not deduction, and thinking tokens come out
+  of the same budget as the answer. Set to `""` for a backend that rejects it.
+- `WATCHER_LLM_MAP_MAX_TOKENS` (1024), `WATCHER_LLM_REDUCE_MAX_TOKENS` (4096),
+  and `WATCHER_LLM_CHANGELOG_MAX_TOKENS` (2048) replace the hardcoded values.
+
+## [Unreleased]
+
 ### Changed
 
 - Summarization now runs on an OpenAI-compatible LLM gateway

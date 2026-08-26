@@ -3,11 +3,12 @@
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import openai
 import pytest
 
 from claude_watcher.config import Settings
 from claude_watcher.differ import DiffResult
-from claude_watcher.drift_checker import _load_mappings, check_drift
+from claude_watcher.drift_checker import _is_no_drift, _load_mappings, check_drift
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -20,7 +21,7 @@ def _settings(tmp_path: Path, **kwargs) -> Settings:
     return Settings(
         snapshots_dir=tmp_path,
         drift_mappings_file=mappings_file,
-        anthropic_api_key="sk-ant-test",
+        llm_api_key="gw-test-key",
         drift_check_enabled=True,
         _env_file=None,  # type: ignore[call-arg]
         **kwargs,
@@ -35,8 +36,52 @@ def _write_snapshot(tmp_path: Path, filename: str, content: str) -> None:
     (tmp_path / filename).write_text(content, encoding="utf-8")
 
 
+def _response(text: str, *, prompt_tokens: int = 10, completion_tokens: int = 5):
+    """An OpenAI-shaped chat completion."""
+    msg = MagicMock()
+    msg.choices = [MagicMock(message=MagicMock(content=text))]
+    msg.usage = MagicMock(
+        prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
+    )
+    return msg
+
+
+def _rate_limited() -> openai.RateLimitError:
+    response = MagicMock(status_code=429, headers={}, request=MagicMock())
+    return openai.RateLimitError("rate limited", response=response, body=None)
+
+
+def _server_error() -> openai.APIStatusError:
+    response = MagicMock(status_code=500, headers={}, request=MagicMock())
+    return openai.APIStatusError("server error", response=response, body=None)
+
+
+# The client is built inside `claude_watcher.llm`, so that is the patch point
+# for every test in this module.
+_PATCH_TARGET = "claude_watcher.llm.openai.AsyncOpenAI"
+
+
+def _client(create) -> MagicMock:
+    client = MagicMock()
+    client.chat.completions.create = create
+    return client
+
+
 # ---------------------------------------------------------------------------
-# Short-circuit: no intersection -> None, zero network/Anthropic calls
+# NO DRIFT sentinel normalization
+# ---------------------------------------------------------------------------
+
+
+def test_no_drift_sentinel_is_normalized() -> None:
+    """A model that answers 'No drift found.' must not produce a digest."""
+    assert _is_no_drift("NO DRIFT")
+    assert _is_no_drift("  no drift found.\n")
+    assert _is_no_drift("No Drift")
+    assert not _is_no_drift("- Hook names changed")
+
+
+# ---------------------------------------------------------------------------
+# Short-circuit: no intersection -> None, zero network/LLM calls
 # ---------------------------------------------------------------------------
 
 
@@ -55,8 +100,7 @@ async def test_no_intersection_returns_none_and_no_calls(tmp_path: Path) -> None
         new_pages=[],
     )
 
-    # Patch AsyncAnthropic so we can assert it's never instantiated/called
-    with patch("claude_watcher.drift_checker.anthropic.AsyncAnthropic") as mock_cls:
+    with patch(_PATCH_TARGET) as mock_cls:
         with patch("claude_watcher.drift_checker.httpx.AsyncClient") as mock_http_cls:
             result = await check_drift(diff, settings)
 
@@ -80,7 +124,7 @@ async def test_empty_mapping_file_returns_none(tmp_path: Path) -> None:
 
     diff = DiffResult(modified_pages=["docs__en__hooks.md"])
 
-    with patch("claude_watcher.drift_checker.anthropic.AsyncAnthropic") as mock_cls:
+    with patch(_PATCH_TARGET) as mock_cls:
         result = await check_drift(diff, settings)
 
     assert result is None
@@ -122,7 +166,7 @@ def test_drift_check_active_false_when_disabled(tmp_path: Path) -> None:
 
     settings = Settings(
         drift_check_enabled=False,
-        anthropic_api_key="sk-ant-test",
+        llm_api_key="gw-test-key",
         drift_mappings_file=mappings_path,
         _env_file=None,  # type: ignore[call-arg]
     )
@@ -130,24 +174,42 @@ def test_drift_check_active_false_when_disabled(tmp_path: Path) -> None:
 
 
 def test_drift_check_active_false_with_no_api_key(tmp_path: Path) -> None:
-    """drift_check_active is False when anthropic_api_key is missing."""
+    """drift_check_active is False when llm_api_key is missing.
+
+    This gate is separate from summarizer_enabled and returns False silently —
+    missing it would leave the drift check permanently and invisibly dead.
+    """
     mappings_path = tmp_path / "drift-mappings.yaml"
     _write_mappings(mappings_path, "docs__en__hooks.md:\n  - https://example.com/\n")
 
     settings = Settings(
         drift_check_enabled=True,
-        anthropic_api_key="",
+        llm_api_key="",
         drift_mappings_file=mappings_path,
         _env_file=None,  # type: ignore[call-arg]
     )
     assert settings.drift_check_active is False
 
 
+def test_drift_check_active_true_with_llm_key(tmp_path: Path) -> None:
+    """The gate opens on the gateway key, not the retired Anthropic one."""
+    mappings_path = tmp_path / "drift-mappings.yaml"
+    _write_mappings(mappings_path, "docs__en__hooks.md:\n  - https://example.com/\n")
+
+    settings = Settings(
+        drift_check_enabled=True,
+        llm_api_key="gw-test-key",
+        drift_mappings_file=mappings_path,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    assert settings.drift_check_active is True
+
+
 def test_drift_check_active_false_when_no_mapping_file(tmp_path: Path) -> None:
     """drift_check_active is False when the mapping file doesn't exist."""
     settings = Settings(
         drift_check_enabled=True,
-        anthropic_api_key="sk-ant-test",
+        llm_api_key="gw-test-key",
         drift_mappings_file=tmp_path / "nonexistent.yaml",
         _env_file=None,  # type: ignore[call-arg]
     )
@@ -187,31 +249,19 @@ async def test_drift_found_returns_digest(tmp_path: Path, httpx_mock) -> None:
     settings = _settings(tmp_path, drift_mappings_file=mappings_path)
     diff = DiffResult(modified_pages=["docs__en__hooks.md"])
 
-    # Build a mock Anthropic client that returns drift findings in map step
-    # and a digest in reduce step
-    map_message = MagicMock()
-    map_message.content = [MagicMock(text="- Hook event names changed from X to Y")]
-
-    reduce_message = MagicMock()
-    reduce_message.content = [
-        MagicMock(text="WRONG: Hook event names changed from X to Y")
-    ]
-    reduce_message.usage = MagicMock(input_tokens=100, output_tokens=50)
-
-    mock_anthropic = AsyncMock()
-    mock_anthropic.messages.create = AsyncMock(
-        side_effect=[map_message, reduce_message]
+    create = AsyncMock(
+        side_effect=[
+            _response("- Hook event names changed from X to Y"),
+            _response("WRONG: Hook event names changed from X to Y"),
+        ]
     )
 
-    with patch(
-        "claude_watcher.drift_checker.anthropic.AsyncAnthropic",
-        return_value=mock_anthropic,
-    ):
+    with patch(_PATCH_TARGET, return_value=_client(create)):
         result = await check_drift(diff, settings)
 
     assert result is not None
     assert "WRONG" in result
-    assert mock_anthropic.messages.create.call_count == 2
+    assert create.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -237,21 +287,14 @@ async def test_no_drift_returns_none(tmp_path: Path, httpx_mock) -> None:
     settings = _settings(tmp_path, drift_mappings_file=mappings_path)
     diff = DiffResult(modified_pages=["docs__en__skills.md"])
 
-    map_message = MagicMock()
-    map_message.content = [MagicMock(text="NO DRIFT")]
+    create = AsyncMock(return_value=_response("NO DRIFT"))
 
-    mock_anthropic = AsyncMock()
-    mock_anthropic.messages.create = AsyncMock(return_value=map_message)
-
-    with patch(
-        "claude_watcher.drift_checker.anthropic.AsyncAnthropic",
-        return_value=mock_anthropic,
-    ):
+    with patch(_PATCH_TARGET, return_value=_client(create)):
         result = await check_drift(diff, settings)
 
     assert result is None
     # Only the map call should have been made (reduce is skipped when no drift)
-    assert mock_anthropic.messages.create.call_count == 1
+    assert create.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -261,9 +304,7 @@ async def test_no_drift_returns_none(tmp_path: Path, httpx_mock) -> None:
 
 @pytest.mark.asyncio
 async def test_api_error_during_map_returns_none(tmp_path: Path, httpx_mock) -> None:
-    """An Anthropic API error during map step returns None without crashing."""
-    import anthropic as anthropic_lib
-
+    """An LLM error during map step returns None without crashing."""
     mappings_path = tmp_path / "drift-mappings.yaml"
     _write_mappings(
         mappings_path,
@@ -279,19 +320,9 @@ async def test_api_error_during_map_returns_none(tmp_path: Path, httpx_mock) -> 
     settings = _settings(tmp_path, drift_mappings_file=mappings_path)
     diff = DiffResult(modified_pages=["docs__en__hooks.md"])
 
-    mock_anthropic = AsyncMock()
-    mock_anthropic.messages.create = AsyncMock(
-        side_effect=anthropic_lib.APIStatusError(
-            "rate limited",
-            response=MagicMock(status_code=429, headers={}),
-            body=None,
-        )
-    )
+    create = AsyncMock(side_effect=_rate_limited())
 
-    with patch(
-        "claude_watcher.drift_checker.anthropic.AsyncAnthropic",
-        return_value=mock_anthropic,
-    ):
+    with patch(_PATCH_TARGET, return_value=_client(create)):
         result = await check_drift(diff, settings)
 
     assert result is None
@@ -299,9 +330,7 @@ async def test_api_error_during_map_returns_none(tmp_path: Path, httpx_mock) -> 
 
 @pytest.mark.asyncio
 async def test_api_error_during_reduce_returns_none(tmp_path: Path, httpx_mock) -> None:
-    """An Anthropic API error during reduce step returns None without crashing."""
-    import anthropic as anthropic_lib
-
+    """An LLM error during reduce step returns None without crashing."""
     mappings_path = tmp_path / "drift-mappings.yaml"
     _write_mappings(
         mappings_path,
@@ -317,25 +346,11 @@ async def test_api_error_during_reduce_returns_none(tmp_path: Path, httpx_mock) 
     settings = _settings(tmp_path, drift_mappings_file=mappings_path)
     diff = DiffResult(modified_pages=["docs__en__hooks.md"])
 
-    map_message = MagicMock()
-    map_message.content = [MagicMock(text="- Some drift item found")]
-
-    mock_anthropic = AsyncMock()
-    mock_anthropic.messages.create = AsyncMock(
-        side_effect=[
-            map_message,
-            anthropic_lib.APIStatusError(
-                "server error",
-                response=MagicMock(status_code=500, headers={}),
-                body=None,
-            ),
-        ]
+    create = AsyncMock(
+        side_effect=[_response("- Some drift item found"), _server_error()]
     )
 
-    with patch(
-        "claude_watcher.drift_checker.anthropic.AsyncAnthropic",
-        return_value=mock_anthropic,
-    ):
+    with patch(_PATCH_TARGET, return_value=_client(create)):
         result = await check_drift(diff, settings)
 
     assert result is None
@@ -365,22 +380,14 @@ async def test_new_pages_also_trigger_drift_check(tmp_path: Path, httpx_mock) ->
     # Simulate a NEW page (not modified)
     diff = DiffResult(new_pages=["docs__en__agent-teams.md"], modified_pages=[])
 
-    map_message = MagicMock()
-    map_message.content = [MagicMock(text="- Agent team launch API changed")]
-
-    reduce_message = MagicMock()
-    reduce_message.content = [MagicMock(text="OUTDATED: Agent team launch API changed")]
-    reduce_message.usage = MagicMock(input_tokens=80, output_tokens=30)
-
-    mock_anthropic = AsyncMock()
-    mock_anthropic.messages.create = AsyncMock(
-        side_effect=[map_message, reduce_message]
+    create = AsyncMock(
+        side_effect=[
+            _response("- Agent team launch API changed"),
+            _response("OUTDATED: Agent team launch API changed"),
+        ]
     )
 
-    with patch(
-        "claude_watcher.drift_checker.anthropic.AsyncAnthropic",
-        return_value=mock_anthropic,
-    ):
+    with patch(_PATCH_TARGET, return_value=_client(create)):
         result = await check_drift(diff, settings)
 
     assert result is not None
@@ -394,7 +401,7 @@ async def test_new_pages_also_trigger_drift_check(tmp_path: Path, httpx_mock) ->
 
 @pytest.mark.asyncio
 async def test_drift_client_built_with_max_retries(tmp_path: Path, httpx_mock) -> None:
-    """AsyncAnthropic is constructed with max_retries from settings."""
+    """AsyncOpenAI is constructed with base_url, key, and retries from settings."""
     mappings_path = tmp_path / "drift-mappings.yaml"
     _write_mappings(
         mappings_path,
@@ -408,18 +415,16 @@ async def test_drift_client_built_with_max_retries(tmp_path: Path, httpx_mock) -
     settings = _settings(tmp_path, drift_mappings_file=mappings_path)
     diff = DiffResult(modified_pages=["docs__en__hooks.md"])
 
-    map_message = MagicMock()
-    map_message.content = [MagicMock(text="NO DRIFT")]
-    mock_anthropic = AsyncMock()
-    mock_anthropic.messages.create = AsyncMock(return_value=map_message)
+    create = AsyncMock(return_value=_response("NO DRIFT"))
 
-    with patch(
-        "claude_watcher.drift_checker.anthropic.AsyncAnthropic",
-        return_value=mock_anthropic,
-    ) as mock_cls:
+    with patch(_PATCH_TARGET, return_value=_client(create)) as mock_cls:
         await check_drift(diff, settings)
 
-    mock_cls.assert_called_once_with(api_key="sk-ant-test", max_retries=5)
+    mock_cls.assert_called_once_with(
+        base_url=settings.llm_base_url,
+        api_key="gw-test-key",
+        max_retries=5,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -429,9 +434,11 @@ async def test_drift_client_built_with_max_retries(tmp_path: Path, httpx_mock) -
 
 @pytest.mark.asyncio
 async def test_one_bad_pair_does_not_abort_others(tmp_path: Path, httpx_mock) -> None:
-    """A 429 on one pair skips it; the surviving pair's drift still synthesizes."""
-    import anthropic as anthropic_lib
+    """A 429 on one pair skips it; the surviving pair's drift still synthesizes.
 
+    _check_pair has no try/except of its own — this asserts the re-raise from
+    `llm.complete` still lands in bounded_gather(return_exceptions=True).
+    """
     mappings_path = tmp_path / "drift-mappings.yaml"
     _write_mappings(
         mappings_path,
@@ -450,32 +457,17 @@ async def test_one_bad_pair_does_not_abort_others(tmp_path: Path, httpx_mock) ->
     settings = _settings(tmp_path, drift_mappings_file=mappings_path)
     diff = DiffResult(modified_pages=["docs__en__good.md", "docs__en__bad.md"])
 
-    good_map = MagicMock()
-    good_map.content = [MagicMock(text="- good page drifted")]
-    reduce_message = MagicMock()
-    reduce_message.content = [MagicMock(text="WRONG: good page drifted")]
-    reduce_message.usage = MagicMock(input_tokens=10, output_tokens=5)
-
     async def create(**kwargs):
-        content = kwargs["messages"][0]["content"]
-        # Map (per-pair) calls use Haiku; reduce (synthesis) uses Sonnet.
-        if "haiku" in kwargs["model"]:
-            if "docs__en__bad.md" in content:
-                raise anthropic_lib.APIStatusError(
-                    "rate limited",
-                    response=MagicMock(status_code=429, headers={}),
-                    body=None,
-                )
-            return good_map
-        return reduce_message
+        # The map prompt names a single pair; the reduce prompt receives the
+        # assembled findings. Dispatch on which pair the user message carries.
+        content = kwargs["messages"][1]["content"]
+        if "ECOSYSTEM FILE:" not in content:
+            return _response("WRONG: good page drifted")
+        if "docs__en__bad.md" in content:
+            raise _rate_limited()
+        return _response("- good page drifted")
 
-    mock_anthropic = MagicMock()
-    mock_anthropic.messages.create = create
-
-    with patch(
-        "claude_watcher.drift_checker.anthropic.AsyncAnthropic",
-        return_value=mock_anthropic,
-    ):
+    with patch(_PATCH_TARGET, return_value=_client(create)):
         result = await check_drift(diff, settings)
 
     assert result is not None

@@ -1,6 +1,6 @@
 # claude-watcher
 
-Self-hosted documentation watcher for Claude Code. Polls all Claude Code documentation pages, diffs against last known state (stored as git commits), summarizes changes via Claude API, and delivers digests to Discord and email.
+Self-hosted documentation watcher for Claude Code. Polls all Claude Code documentation pages, diffs against last known state (stored as git commits), summarizes changes on the estate LLM gateway, and delivers digests to Discord and email.
 
 ## Why
 
@@ -9,7 +9,7 @@ Claude Code releases multiple times per week with no RSS feed or structured chan
 ## How It Works
 
 ```
-Fetch all pages → git diff → Claude summary → Discord + Email → git commit
+Fetch all pages → git diff → LLM summary → Discord + Email → git commit
 ```
 
 - **Source discovery**: Auto-fetches all pages from each source's `llms.txt` index:
@@ -17,7 +17,15 @@ Fetch all pages → git diff → Claude summary → Discord + Email → git comm
   - **Anthropic API docs** — `platform.claude.com/llms.txt` (~1,500 pages) → committed under `snapshots/api-docs/`. Set `WATCHER_API_DOCS_BASE_URL=""` to disable this source.
 - **State store**: Git repo — snapshots committed after each run, `git log` = history, `git diff HEAD~1` = last changes. Set `WATCHER_GIT_REMOTE_URL` to also push that history to a remote (e.g. Gitea/GitHub) after every commit; leave it unset to keep commits local to the volume
 - **Smart scheduling**: Polls based on Anthropic's publishing patterns (peak hours more frequent)
-- **Categorized digests**: Security, breaking changes, plugin impact, new features
+- **Categorized digests**: Security, breaking changes, plugin impact, new features.
+  Digests longer than one Discord embed are split into ordered numbered parts —
+  nothing is truncated
+- **Summarization**: an OpenAI-compatible endpoint (`WATCHER_LLM_BASE_URL`), which in
+  the estate is agentgateway fronting free local inference. A per-file diff that
+  provably changed no prose — whitespace, a retargeted link, a moved anchor — is
+  summarized mechanically and never reaches the model. When the endpoint is
+  unreachable the digest degrades to the plain changed-page list; it never falls
+  back to a paid provider
 
 ### Adding / seeding a source
 
@@ -90,14 +98,17 @@ After each full docs run, the watcher can compare changed upstream pages against
 ```text
 Changed upstream pages → intersect with drift-mappings.yaml
   → fetch raw ecosystem files
-  → Claude Haiku maps each pair (does this contradict or omit?)
-  → Claude Sonnet reduces findings into a prioritized digest
+  → the map model checks each pair (does this contradict or omit?)
+  → the reduce model synthesizes a prioritized digest
   → Deliver as a separate digest (WRONG / OUTDATED items)
 ```
 
 ### Enable
 
-Set `WATCHER_DRIFT_CHECK_ENABLED=true` in your `.env`. Requires `WATCHER_ANTHROPIC_API_KEY`.
+Set `WATCHER_DRIFT_CHECK_ENABLED=true` in your `.env`. Requires `WATCHER_LLM_API_KEY`.
+
+The `NO DRIFT` sentinel is a string match on the model's reply. It is untested
+against a local model, which is one reason the check ships disabled.
 
 The mapping file (`drift-mappings.yaml` at repo root by default) links upstream doc filenames to raw GitHub URLs of your ecosystem files. The filename convention matches the snapshot filenames produced by the fetcher: `docs__en__<page>.md`.
 
@@ -114,7 +125,7 @@ The mapping file is itself drift-prone — review entries whenever upstream docs
 |---|---|---|
 | `WATCHER_DRIFT_CHECK_ENABLED` | `false` | Enable drift checking |
 | `WATCHER_DRIFT_MAPPINGS_FILE` | `drift-mappings.yaml` | Path to the mapping file |
-| `WATCHER_DRIFT_REVIEW_MODEL` | `claude-sonnet-4-6` | Model for drift synthesis (optional) |
+| `WATCHER_DRIFT_REVIEW_MODEL` | `WATCHER_LLM_REDUCE_MODEL` | Model for drift synthesis (optional) |
 
 ## License
 

@@ -3,14 +3,15 @@
 import asyncio
 from pathlib import Path
 
-import anthropic
 import httpx
 import structlog
 import yaml
 
+from claude_watcher import llm
 from claude_watcher.concurrency import bounded_gather
 from claude_watcher.config import Settings
 from claude_watcher.differ import DiffResult
+from claude_watcher.llm import LLMError
 
 logger = structlog.get_logger()
 
@@ -34,6 +35,19 @@ Produce a single prioritized digest. Label each item:
   OUTDATED — ecosystem file is missing new upstream content that matters
 Skip NO DRIFT pairs. If ALL pairs report NO DRIFT, return exactly: NO DRIFT
 Use Discord markdown. Keep the total response under 2500 characters."""
+
+_NO_DRIFT = "NO DRIFT"
+
+
+def _is_no_drift(findings: str) -> bool:
+    """Whether a map result is the no-drift sentinel.
+
+    Plain equality on the literal was the whole filter, which a model answering
+    "No drift found." defeats — producing a digest of nothing. Normalizing is
+    cheap hardening; it is UNTESTED against a local model, and the drift check
+    ships disabled by default.
+    """
+    return findings.strip().upper().startswith(_NO_DRIFT)
 
 
 def _load_mappings(mappings_file: Path) -> dict[str, list[str]]:
@@ -82,8 +96,8 @@ async def _check_pair(
     upstream_content: str,
     ecosystem_url: str,
     ecosystem_content: str,
-    client: anthropic.AsyncAnthropic,
     map_model: str,
+    settings: Settings,
 ) -> tuple[str, str, str]:
     """MAP step: check a single (upstream-page, ecosystem-file) pair for drift.
 
@@ -95,18 +109,19 @@ async def _check_pair(
         f"ECOSYSTEM FILE: {ecosystem_url}\n\n"
         f"```\n{ecosystem_content[:8000]}\n```"
     )
-    response = await client.messages.create(
+    text, _input_tokens, _output_tokens = await llm.complete(
+        _MAP_PROMPT,
+        user_message,
+        512,
         model=map_model,
-        max_tokens=512,
-        system=_MAP_PROMPT,
-        messages=[{"role": "user", "content": user_message}],
+        settings=settings,
     )
-    findings = response.content[0].text.strip()
+    findings = text.strip()
     logger.debug(
         "Drift pair checked.",
         upstream_page=upstream_page,
         ecosystem_url=ecosystem_url,
-        has_drift=findings != "NO DRIFT",
+        has_drift=not _is_no_drift(findings),
     )
     return upstream_page, ecosystem_url, findings
 
@@ -172,17 +187,14 @@ async def check_drift(diff: DiffResult, settings: Settings) -> str | None:
         logger.info("Drift check: no fetchable pairs remain after content loading.")
         return None
 
-    client = anthropic.AsyncAnthropic(
-        api_key=settings.anthropic_api_key,
-        max_retries=settings.summarizer_max_retries,
-    )
-    map_model = "claude-haiku-4-5-20251001"
-    reduce_model = settings.drift_review_model or "claude-sonnet-4-6"
+    map_model = settings.llm_map_model
+    reduce_model = settings.drift_review_model or settings.llm_reduce_model
 
     # MAP step — fan out per pair with bounded concurrency. A failed pair is
     # skipped rather than aborting the whole check (return_exceptions=True).
+    # _check_pair has no try/except of its own and relies on that.
     map_tasks = [
-        _check_pair(page, upstream_content, url, ecosystem_content, client, map_model)
+        _check_pair(page, upstream_content, url, ecosystem_content, map_model, settings)
         for page, upstream_content, url, ecosystem_content in pairs
     ]
     raw_results = await bounded_gather(settings.summarizer_max_concurrency, *map_tasks)
@@ -201,32 +213,35 @@ async def check_drift(diff: DiffResult, settings: Settings) -> str | None:
     drift_findings = [
         (page, url, findings)
         for page, url, findings in map_results
-        if findings != "NO DRIFT"
+        if not _is_no_drift(findings)
     ]
 
     if not drift_findings:
         logger.info("Drift check: no drift found across all pairs.")
         return None
 
-    # REDUCE step — synthesize into a single digest
-    reduce_input = "\n\n".join(
-        f"### {page} vs {url}\n{findings}" for page, url, findings in drift_findings
+    # REDUCE step — synthesize into a single digest, under the same assembled
+    # -input budget the summarizer's reduce steps use.
+    reduce_input = llm.fit_sections(
+        [f"### {page} vs {url}\n{findings}" for page, url, findings in drift_findings],
+        settings.summarizer_max_reduce_chars,
     )
 
     try:
-        reduce_response = await client.messages.create(
+        text, input_tokens, output_tokens = await llm.complete(
+            _REDUCE_PROMPT,
+            reduce_input,
+            1024,
             model=reduce_model,
-            max_tokens=1024,
-            system=_REDUCE_PROMPT,
-            messages=[{"role": "user", "content": reduce_input}],
+            settings=settings,
         )
-        digest = reduce_response.content[0].text.strip()
+        digest = text.strip()
         logger.info(
             "Drift check synthesis complete.",
-            input_tokens=reduce_response.usage.input_tokens,
-            output_tokens=reduce_response.usage.output_tokens,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
-    except anthropic.APIError as exc:
+    except LLMError as exc:
         logger.error(
             "Drift check API error during reduce step, skipping.",
             error=str(exc),
@@ -234,7 +249,7 @@ async def check_drift(diff: DiffResult, settings: Settings) -> str | None:
         )
         return None
 
-    if digest == "NO DRIFT":
+    if _is_no_drift(digest):
         return None
 
     return digest

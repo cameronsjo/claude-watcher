@@ -1,13 +1,14 @@
-"""Claude API digest generation from documentation diffs."""
+"""LLM digest generation from documentation diffs."""
 
 import re
 
-import anthropic
 import structlog
 
+from claude_watcher import llm
 from claude_watcher.concurrency import bounded_gather
 from claude_watcher.config import Settings
 from claude_watcher.differ import DiffResult
+from claude_watcher.llm import LLMError
 
 _TRUNCATION_MARKER = "\n[... diff truncated ...]"
 
@@ -43,7 +44,7 @@ categories that have relevant changes:
 
 Under each category, use bullet points (`-`) with concise descriptions. \
 Reference exact setting names, hook types, API changes, or config keys.
-Flag anything a plugin developer or security engineer must act on with \u26a0\ufe0f.
+Flag anything a plugin developer or security engineer must act on with ⚠️.
 Skip categories with no relevant changes.
 Keep the total response under 3500 characters."""
 
@@ -53,6 +54,35 @@ You are summarizing Claude Code changelog entries.
 Write a concise release summary: one TL;DR sentence, then bullet points for
 each notable change. Group related items. Reference exact version numbers,
 flags, and setting names. Skip minor wording fixes."""
+
+# --- Triviality filter -----------------------------------------------------
+# Inline markdown link: `[text](target)`, with an optional `"title"`. Anchored
+# on the opening bracket, and the target may not contain whitespace — an
+# earlier `\]\(.*?\)` matched a bare `](` with no `[` before it, so arbitrary
+# prose written inside the parens was erased along with the target and the
+# whole line classified as trivial.
+_LINK = re.compile(r"\[([^\]]*)\]\(([^)\s]*)(?:\s+\"[^\"]*\")?\)")
+# Reference-style link definitions: `[label]: https://...`
+_REF_LINK_DEF = re.compile(r"^(\[[^\]]+\]:)\s*(\S+)")
+# The scheme+authority of a URL — everything before the first `/`, `?`, or `#`.
+_URL_HOST = re.compile(r"([a-zA-Z][\w+.-]*://[^/?#]*)")
+# Anchor fragments, but only where they hang off a URL — stripping every `#foo`
+# would also eat prose, and prose is exactly what this filter must not ignore.
+_URL_ANCHOR = re.compile(r"(https?://\S*?)#[\w./-]+")
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _link_signature(target: str) -> str:
+    """The part of a link target whose change is worth a model call.
+
+    A docs site reshuffling its own paths is noise. A link that starts
+    pointing at a DIFFERENT HOST — an install script, a download, a security
+    page — is exactly the change this watcher's audience must not have
+    filtered out. So compare hosts and ignore path, query, and fragment; a
+    relative link has no host and compares equal to another relative link.
+    """
+    match = _URL_HOST.match(target)
+    return match.group(1).lower() if match else ""
 
 
 def _split_by_file(raw_diff: str) -> dict[str, str]:
@@ -69,6 +99,69 @@ def _split_by_file(raw_diff: str) -> dict[str, str]:
     return files
 
 
+def _normalize_content_line(body: str) -> str:
+    """Reduce a diff content line to the prose it carries, or '' if none."""
+    stripped = body.strip()
+    definition = _REF_LINK_DEF.match(stripped)
+    if definition:
+        # A link definition carries no prose — keep its label and the target's
+        # host, so a path fix reads as no change but a host swap does not.
+        label, target = definition.groups()
+        return f"{label} {_link_signature(target)}"
+    body = _LINK.sub(lambda m: f"[{m.group(1)}]({_link_signature(m.group(2))})", body)
+    body = _URL_ANCHOR.sub(r"\1", body)
+    return _WHITESPACE.sub(" ", body).strip()
+
+
+def _is_trivial_hunk(chunk: str) -> bool:
+    """True when a file's diff provably changed no prose.
+
+    Whitespace churn, same-host link repointing, and moved anchors cost a model call
+    today for a change nobody wants a summary of. Everything else — including
+    anything this cannot classify — goes to the model: a missed call is cheap,
+    a missed change is not.
+    """
+    added: list[str] = []
+    removed: list[str] = []
+    in_hunk = False
+
+    for line in chunk.splitlines():
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        # Everything before the first `@@` is the header block — `diff --git`,
+        # `index`, `--- a/f`, `+++ b/f`. Skipping it wholesale is load-bearing:
+        # a `+`/`-` scan that saw `+++ b/f` and `--- a/f` would find a mismatch
+        # in every hunk, and the filter would fire on nothing, forever.
+        if not in_hunk:
+            continue
+        if line.startswith("\\"):  # "\ No newline at end of file"
+            continue
+        if line.startswith("+"):
+            target = added
+        elif line.startswith("-"):
+            target = removed
+        else:
+            continue
+        normalized = _normalize_content_line(line[1:])
+        if normalized:
+            target.append(normalized)
+
+    if not in_hunk:
+        # No hunk at all — a rename, mode change, or binary diff. Unclassified,
+        # so it goes to the model.
+        return False
+
+    # Ordered comparison, not set: a pure reordering is a real change, and a
+    # set would also collapse duplicate add/remove pairs.
+    return added == removed
+
+
+def _trivial_summary(filename: str) -> str:
+    """One-liner standing in for a file whose diff changed no prose."""
+    return f"`{filename}` — formatting/link changes only"
+
+
 def _stub_summary(filename: str) -> str:
     """Placeholder used when a single file can't be summarized."""
     return f"(summary unavailable — {filename} changed)"
@@ -77,9 +170,9 @@ def _stub_summary(filename: str) -> str:
 async def _summarize_file(
     filename: str,
     chunk: str,
-    client: anthropic.AsyncAnthropic,
     model: str,
     max_chars: int,
+    settings: Settings,
 ) -> tuple[str, str]:
     """Summarize a single file diff. Returns (filename, summary).
 
@@ -97,13 +190,14 @@ async def _summarize_file(
         user_content = f"FILE: {filename}\n\n```diff\n{chunk}\n```"
 
     try:
-        response = await client.messages.create(
+        text, _input_tokens, _output_tokens = await llm.complete(
+            _FILE_SUMMARY_PROMPT,
+            user_content,
+            512,
             model=model,
-            max_tokens=512,
-            system=_FILE_SUMMARY_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
+            settings=settings,
         )
-    except anthropic.APIError as exc:
+    except LLMError as exc:
         logger.warning(
             "Per-file summarization failed, using stub.",
             file=filename,
@@ -111,28 +205,19 @@ async def _summarize_file(
             status_code=getattr(exc, "status_code", None),
         )
         return filename, _stub_summary(filename)
-    return filename, response.content[0].text
+    return filename, text
 
 
 async def summarize_diff(diff: DiffResult, settings: Settings) -> str:
-    """Generate a categorized summary of documentation changes using Claude.
+    """Generate a categorized summary of documentation changes.
 
     Uses per-file summarization (fan-out) followed by synthesis (reduce),
     so no diff content is ever truncated regardless of total size.
     Changelog files and doc files are synthesized separately.
     """
     if not settings.summarizer_enabled:
-        logger.warning("Summarizer disabled — WATCHER_ANTHROPIC_API_KEY not set.")
+        logger.warning("Summarizer disabled — WATCHER_LLM_API_KEY not set.")
         return _fallback_summary(diff, reason="no API key configured")
-
-    client = anthropic.AsyncAnthropic(
-        api_key=settings.anthropic_api_key,
-        max_retries=settings.summarizer_max_retries,
-    )
-    # Fan-out uses Haiku — fast and cheap for focused per-file work
-    map_model = "claude-haiku-4-5-20251001"
-    # Synthesis uses Sonnet for higher-quality cross-file reasoning
-    reduce_model = "claude-sonnet-4-6"
 
     per_file = _split_by_file(diff.raw_diff)
 
@@ -149,39 +234,58 @@ async def summarize_diff(diff: DiffResult, settings: Settings) -> str:
             deferred=len(deferred),
         )
 
+    # Prose-free hunks get a mechanical one-liner and no model call at all.
+    trivial: dict[str, str] = {}
+    substantive: list[tuple[str, str]] = []
+    for fname, chunk in items:
+        if _is_trivial_hunk(chunk):
+            trivial[fname] = _trivial_summary(fname)
+        else:
+            substantive.append((fname, chunk))
+
     is_changelog = _CHANGELOG_PATTERN.search
 
     logger.info(
         "Starting per-file summarization.",
         changelog_files=sum(1 for f, _ in items if is_changelog(f)),
         doc_files=sum(1 for f, _ in items if not is_changelog(f)),
+        skipped_trivial=len(trivial),
+        summarizing=len(substantive),
         deferred=len(deferred),
     )
 
     # Fan out — summarize files with bounded concurrency so a large diff drains
-    # as a throttled queue instead of bursting past the org rate limit.
+    # as a throttled queue instead of bursting past the endpoint's capacity.
     tasks = [
         _summarize_file(
-            fname, chunk, client, map_model, settings.summarizer_max_input_chars
+            fname,
+            chunk,
+            settings.llm_map_model,
+            settings.summarizer_max_input_chars,
+            settings,
         )
-        for fname, chunk in items
+        for fname, chunk in substantive
     ]
     results = await bounded_gather(settings.summarizer_max_concurrency, *tasks)
 
     # Each result is a (filename, summary) tuple; a stray exception (anything
     # not already caught inside _summarize_file) degrades to a stub.
-    file_summaries: dict[str, str] = {}
-    for (fname, _chunk), result in zip(items, results, strict=True):
+    summarized: dict[str, str] = {}
+    for (fname, _chunk), result in zip(substantive, results, strict=True):
         if isinstance(result, BaseException):
             logger.warning(
                 "Per-file summarization raised unexpectedly, using stub.",
                 file=fname,
                 error=str(result),
             )
-            file_summaries[fname] = _stub_summary(fname)
+            summarized[fname] = _stub_summary(fname)
         else:
             summarized_name, summary = result
-            file_summaries[summarized_name] = summary
+            summarized[summarized_name] = summary
+
+    # Re-inject the skipped files and restore the original diff order.
+    summarized.update(trivial)
+    file_summaries = {fname: summarized[fname] for fname, _ in items}
 
     changelog_summaries = {f: s for f, s in file_summaries.items() if is_changelog(f)}
     doc_summaries = {f: s for f, s in file_summaries.items() if not is_changelog(f)}
@@ -191,9 +295,6 @@ async def summarize_diff(diff: DiffResult, settings: Settings) -> str:
 
     try:
         if doc_summaries:
-            doc_block = "\n\n".join(
-                f"### {fname}\n{summary}" for fname, summary in doc_summaries.items()
-            )
             page_meta: list[str] = []
             if diff.new_pages:
                 new_list = "\n".join(f"  - {p}" for p in diff.new_pages)
@@ -202,38 +303,47 @@ async def summarize_diff(diff: DiffResult, settings: Settings) -> str:
                 removed_list = "\n".join(f"  - {p}" for p in diff.removed_pages)
                 page_meta.append(f"REMOVED PAGES:\n{removed_list}")
 
-            doc_message = "\n\n".join([*page_meta, doc_block])
-            doc_response = await client.messages.create(
-                model=reduce_model,
-                max_tokens=1024,
-                system=_SYNTHESIS_PROMPT,
-                messages=[{"role": "user", "content": doc_message}],
+            doc_message = llm.fit_sections(
+                [f"### {fname}\n{summary}" for fname, summary in doc_summaries.items()],
+                settings.summarizer_max_reduce_chars,
+                prefix="\n\n".join(page_meta),
             )
-            synthesis_parts.append(doc_response.content[0].text)
+            text, input_tokens, output_tokens = await llm.complete(
+                _SYNTHESIS_PROMPT,
+                doc_message,
+                1024,
+                model=settings.llm_reduce_model,
+                settings=settings,
+            )
+            synthesis_parts.append(text)
             logger.info(
                 "Synthesized doc summary.",
-                input_tokens=doc_response.usage.input_tokens,
-                output_tokens=doc_response.usage.output_tokens,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
             )
 
         if changelog_summaries:
-            changelog_block = "\n\n".join(
-                f"### {fname}\n{summary}"
-                for fname, summary in changelog_summaries.items()
+            changelog_block = llm.fit_sections(
+                [
+                    f"### {fname}\n{summary}"
+                    for fname, summary in changelog_summaries.items()
+                ],
+                settings.summarizer_max_reduce_chars,
             )
-            cl_response = await client.messages.create(
-                model=reduce_model,
-                max_tokens=512,
-                system=_CHANGELOG_SYNTHESIS_PROMPT,
-                messages=[{"role": "user", "content": changelog_block}],
+            text, input_tokens, output_tokens = await llm.complete(
+                _CHANGELOG_SYNTHESIS_PROMPT,
+                changelog_block,
+                512,
+                model=settings.llm_reduce_model,
+                settings=settings,
             )
-            synthesis_parts.append("**Changelog**\n" + cl_response.content[0].text)
+            synthesis_parts.append("**Changelog**\n" + text)
             logger.info(
                 "Synthesized changelog summary.",
-                input_tokens=cl_response.usage.input_tokens,
-                output_tokens=cl_response.usage.output_tokens,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
             )
-    except anthropic.APIError as exc:
+    except LLMError as exc:
         logger.error(
             "Summarizer API call failed during synthesis, using fallback.",
             error=str(exc),
@@ -254,7 +364,7 @@ def _fallback_summary(
     diff: DiffResult,
     reason: str = "summarizer unavailable",
 ) -> str:
-    """Plain-text summary when Claude API is not available.
+    """Plain-text summary when the LLM gateway is not available.
 
     Produces a Discord-markdown-friendly summary with change counts
     and categorized file lists. The reason parameter surfaces WHY

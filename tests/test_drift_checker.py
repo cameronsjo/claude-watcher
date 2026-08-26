@@ -472,3 +472,48 @@ async def test_one_bad_pair_does_not_abort_others(tmp_path: Path, httpx_mock) ->
 
     assert result is not None
     assert "WRONG" in result
+
+
+# ---------------------------------------------------------------------------
+# Output budgets are threaded through, not hardcoded
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_budgets_reach_the_llm_call(tmp_path: Path, httpx_mock) -> None:
+    """The map and reduce budgets come from settings, not from literals.
+
+    Both were hardcoded (512 / 1024) and sized against a provider that emitted
+    no reasoning tokens. Under a reasoning model those caps truncated output
+    mid-sentence, so a silent revert to a literal here is a real regression.
+    """
+    mappings_path = tmp_path / "drift-mappings.yaml"
+    _write_mappings(
+        mappings_path,
+        "docs__en__hooks.md:\n  - https://raw.example.com/hooks-skill.md\n",
+    )
+    _write_snapshot(tmp_path, "docs__en__hooks.md", "# Hooks\nContent.")
+    httpx_mock.add_response(
+        url="https://raw.example.com/hooks-skill.md", text="# Skill\nContent."
+    )
+
+    settings = _settings(
+        tmp_path,
+        drift_mappings_file=mappings_path,
+        llm_map_max_tokens=777,
+        llm_reduce_max_tokens=8888,
+    )
+    diff = DiffResult(modified_pages=["docs__en__hooks.md"])
+
+    seen: list[int] = []
+
+    async def create(**kwargs):
+        seen.append(kwargs["max_tokens"])
+        # First call is the map step; drift found, so the reduce step follows.
+        return _response("- something drifted" if len(seen) == 1 else "WRONG: drift")
+
+    with patch(_PATCH_TARGET, return_value=_client(create)):
+        result = await check_drift(diff, settings)
+
+    assert result is not None
+    assert seen == [777, 8888]

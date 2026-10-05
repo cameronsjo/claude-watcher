@@ -1,0 +1,35 @@
+# Drift-check mapping: upstream docs filename -> ecosystem file(s) to compare against.
+#
+# This mapping is itself drift-prone and is the maintenance cost of the feature.
+# Entries MUST be reviewed when upstream docs are restructured (page renames,
+# splits, merges). Keys use the docs__en__<page>.md filename convention produced
+# by fetcher._url_to_filename().
+
+docs__en__sub-agents.md:
+  - https://raw.githubusercontent.com/cameronsjo/cadence/main/skills/writing-subagents.md
+
+docs__en__agent-teams.md:
+  - https://raw.githubusercontent.com/cameronsjo/cadence/main/skills/using-agent-teams.md
+
+docs__en__skills.md:
+  - https://raw.githubusercontent.com/cameronsjo/cadence/main/skills/writing-skills.md
+
+docs__en__hooks.md:
+  - https://raw.githubusercontent.com/cameronsjo/cadence/main/skills/writing-hooks.md
+  - https://raw.githubusercontent.com/cameronsjo/cadence/main/docs/hooks-reference.md
+
+docs__en__hooks-guide.md:
+  - https://raw.githubusercontent.com/cameronsjo/cadence/main/skills/writing-hooks.md
+  - https://raw.githubusercontent.com/cameronsjo/cadence/main/docs/hooks-reference.md
+
+docs__en__plugins-reference.md:
+  - https://raw.githubusercontent.com/cameronsjo/cadence-groundwork/main/skills/writing-plugins.md
+  - https://raw.githubusercontent.com/cameronsjo/cadence-groundwork/main/skills/marketplace-setup.md
+
+docs__en__plugin-marketplaces.md:
+  - https://raw.githubusercontent.com/cameronsjo/cadence-groundwork/main/skills/marketplace-setup.md
+  - https://raw.githubusercontent.com/cameronsjo/cadence-groundwork/main/skills/writing-plugins.md
+
+docs__en__tools-reference.md:
+  - https://raw.githubusercontent.com/cameronsjo/cadence/main/docs/tools-reference.md
+  - https://raw.githubusercontent.com/cameronsjo/cadence-forge/main/docs/tool-usage-patterns.md

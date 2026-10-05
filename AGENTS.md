@@ -8,7 +8,7 @@ Self-hosted documentation watcher for Claude Code. Polls all Claude Code documen
 - **Package manager**: uv
 - **Linting/Formatting**: Ruff
 - **Testing**: pytest + pytest-asyncio + pytest-httpx
-- **Issue tracking**: Beads (`bd`)
+- **Issue tracking**: GitHub issues
 
 ## Commands
 
@@ -44,38 +44,12 @@ tests/                # Test suite
 - Config via environment variables (Pydantic Settings)
 - Conventional Commits: `type(scope): description`
 
-## Beads Quick Reference
+## Issue Tracking
 
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --status in_progress  # Claim work
-bd close <id>         # Complete work
-bd sync               # Sync with git
-```
+Issues live on GitHub, not in this repo. `bd` (Beads) was retired per
+cadence-groundwork#138 — `.beads/` is dormant historical data, not a work
+queue; don't delete it.
 
-## Landing the Plane (Session Completion)
+## Session Completion
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
-
-**MANDATORY WORKFLOW:**
-
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   bd sync
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
+Use `cadence:outro` to close out a work session.

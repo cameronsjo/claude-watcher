@@ -6,10 +6,10 @@ requires-python = ">=3.13"
 dependencies = [
     "httpx>=0.28",
     "openai>=3.3,<4",
-    "aiosmtplib>=3.0",
+    "aiosmtplib>=5.1.2",
     "structlog>=25.1",
     "apscheduler>=3.11,<4",
-    "pydantic-settings>=2.8",
+    "pydantic-settings>=2.14.2",
     "pyyaml>=6.0",
 ]
 
@@ -18,7 +18,7 @@ claude-watcher = "claude_watcher.main:main"
 
 [dependency-groups]
 dev = [
-    "pytest>=9.0.3",
+    "pytest>=9.1.1",
     "pytest-asyncio>=0.25",
     "pytest-httpx>=0.35",
     "ruff>=0.11",

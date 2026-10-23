@@ -124,6 +124,8 @@ async def _seed_baseline_locked(settings: Settings) -> None:
     Establishes the snapshot baseline for a newly added source quietly, so the
     next scheduled run only diffs genuine changes instead of treating every page
     as new (which would fan out one summarization call per page).
+    Any other pending change, a modified or removed page of an existing source
+    included, is committed with it, also without a digest.
     """
     log = logger.bind(scope="seed")
     log.info("Seeding baseline snapshot.")

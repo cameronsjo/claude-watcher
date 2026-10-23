@@ -121,7 +121,7 @@ def compute_diff(snapshots_dir: Path) -> DiffResult | None:
             result.new_pages.append(filename)
         elif status == "D":
             result.removed_pages.append(filename)
-        elif status.startswith("M") or status.startswith("R"):
+        elif status.startswith("M"):
             result.modified_pages.append(filename)
 
     # Unstage — commit happens after successful delivery

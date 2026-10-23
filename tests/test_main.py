@@ -83,7 +83,10 @@ def test_is_peak_hours_reads_the_cst_weekday(utc: str, expected: bool) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pipeline_runs_do_not_overlap(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("first", ["full", "changelog"])
+async def test_pipeline_runs_do_not_overlap(
+    monkeypatch, tmp_path: Path, first: str
+) -> None:
     """A changelog run waits for an in-flight docs run instead of interleaving."""
     import asyncio
 
@@ -102,9 +105,10 @@ async def test_pipeline_runs_do_not_overlap(monkeypatch, tmp_path: Path) -> None
     monkeypatch.setattr(main_module, "fetch_all_docs", fake_fetch)
     monkeypatch.setattr(main_module, "fetch_changelog", fake_fetch)
 
+    second = "changelog" if first == "full" else "full"
     await asyncio.gather(
-        main_module._run_pipeline("full", settings),
-        main_module._run_pipeline("changelog", settings),
+        main_module._run_pipeline(first, settings),
+        main_module._run_pipeline(second, settings),
     )
 
     assert events == ["fetch", "fetched", "fetch", "fetched"]

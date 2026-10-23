@@ -100,25 +100,46 @@ async def _fetch_single_page(
             return report_name, is_new, False
 
 
+# Root files the docs index never owns: CHANGELOG.md has its own job.
+_NOT_PAGE_SNAPSHOTS = frozenset({"CHANGELOG.md", "README.md"})
+
+# Above this many removals in one run, a removal is more likely a bad or
+# restructured index than real deletions, so nothing is deleted.
+MAX_REMOVALS_PER_RUN = 10
+
+
 def _remove_dropped_pages(target_dir: Path, indexed: set[str]) -> None:
     """Delete snapshots of pages the index no longer lists.
 
     Without this a page dropped from llms.txt keeps its snapshot forever, so the
-    differ never reports it as removed. Only page snapshots directly in
-    target_dir are touched: every page filename has a ``__`` from its URL path,
-    which leaves CHANGELOG.md (its own job) and subdirectories alone. An empty
-    index is treated as a bad read, not as every page being removed.
+    differ never reports it as removed. Only ``*.md`` files directly in
+    target_dir are touched, which leaves subdirectories (another source's) alone.
+
+    An index that would remove more than MAX_REMOVALS_PER_RUN pages, or that
+    lists none, is treated as a bad read: deleting every page and re-adding it
+    on the next run would send two full digests for no real change.
     """
-    if not indexed:
-        logger.warning("Index listed no pages; keeping existing snapshots.")
+    dropped = sorted(
+        path
+        for path in target_dir.glob("*.md")
+        if path.name not in indexed and path.name not in _NOT_PAGE_SNAPSHOTS
+    )
+    if not dropped:
         return
-    for path in target_dir.glob("*__*.md"):
-        if path.name not in indexed:
-            path.unlink()
-            logger.info(
-                "Removed snapshot of a page dropped from the index.",
-                filename=path.name,
-            )
+    if not indexed or len(dropped) > MAX_REMOVALS_PER_RUN:
+        logger.warning(
+            "Index would remove too many pages; keeping existing snapshots.",
+            dir=str(target_dir),
+            would_remove=len(dropped),
+            indexed=len(indexed),
+        )
+        return
+    for path in dropped:
+        path.unlink()
+        logger.info(
+            "Removed snapshot of a page dropped from the index.",
+            filename=path.name,
+        )
 
 
 async def _fetch_source(

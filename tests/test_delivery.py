@@ -1,13 +1,17 @@
 """Tests for delivery module."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from pytest_httpx import HTTPXMock
 
+from claude_watcher import delivery
 from claude_watcher.config import Settings
 from claude_watcher.delivery import (
     DISCORD_MAX_DESCRIPTION,
+    DISCORD_MAX_PARTS,
     _build_embeds,
     _pick_color,
     _split_digest,
@@ -236,3 +240,187 @@ async def test_deliver_reports_failure_when_discord_partially_failed() -> None:
         ok = await deliver("some digest", DiffResult(), _settings())
 
     assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# Rate limits (429 + Retry-After) — real httpx transport via pytest-httpx
+# ---------------------------------------------------------------------------
+
+
+def _three_part_digest() -> str:
+    section = "## Section {n}\n\n" + ("x" * 3000) + "\n\n"
+    return "".join(section.format(n=n) for n in range(3))
+
+
+@pytest.fixture
+def waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record every delivery sleep instead of performing it."""
+    recorded: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        recorded.append(seconds)
+
+    monkeypatch.setattr(delivery, "_sleep", fake_sleep)
+    return recorded
+
+
+def _titles(httpx_mock: HTTPXMock) -> list[str]:
+    return [
+        json.loads(req.content)["embeds"][0]["title"]
+        for req in httpx_mock.get_requests()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_429_waits_retry_after_and_retries_only_that_part(
+    httpx_mock: HTTPXMock, waits: list[float]
+) -> None:
+    """A 429 on part 2 sleeps Retry-After, re-posts part 2, never part 1."""
+    httpx_mock.add_response(url=WEBHOOK, status_code=204)
+    httpx_mock.add_response(
+        url=WEBHOOK, status_code=429, headers={"Retry-After": "1.5"}
+    )
+    httpx_mock.add_response(url=WEBHOOK, status_code=204)
+    httpx_mock.add_response(url=WEBHOOK, status_code=204)
+
+    ok = await deliver_discord(_three_part_digest(), DiffResult(), _settings())
+
+    assert ok is True
+    titles = _titles(httpx_mock)
+    assert [t.split("(")[1] for t in titles] == ["1/3)", "2/3)", "2/3)", "3/3)"]
+    assert 1.5 in waits
+
+
+@pytest.mark.asyncio
+async def test_429_body_retry_after_is_the_fallback(
+    httpx_mock: HTTPXMock, waits: list[float]
+) -> None:
+    """Without the header, Discord's JSON `retry_after` sets the wait."""
+    httpx_mock.add_response(
+        url=WEBHOOK, status_code=429, json={"retry_after": 0.25, "global": False}
+    )
+    httpx_mock.add_response(url=WEBHOOK, status_code=204)
+
+    ok = await deliver_discord("short digest", DiffResult(), _settings())
+
+    assert ok is True
+    assert waits == [0.25]
+
+
+@pytest.mark.asyncio
+async def test_429_retries_are_bounded_per_part(
+    httpx_mock: HTTPXMock, waits: list[float]
+) -> None:
+    """A part that keeps drawing 429 fails delivery after the retry cap."""
+    httpx_mock.add_response(
+        url=WEBHOOK,
+        status_code=429,
+        headers={"Retry-After": "0.1"},
+        is_reusable=True,
+    )
+
+    ok = await deliver_discord("short digest", DiffResult(), _settings())
+
+    assert ok is False
+    assert len(httpx_mock.get_requests()) == delivery.DISCORD_MAX_RETRIES_PER_PART + 1
+    assert len(waits) == delivery.DISCORD_MAX_RETRIES_PER_PART
+
+
+@pytest.mark.asyncio
+async def test_429_total_wait_is_bounded(
+    httpx_mock: HTTPXMock, waits: list[float]
+) -> None:
+    """A Retry-After past the total wait budget fails fast instead of sleeping."""
+    httpx_mock.add_response(
+        url=WEBHOOK,
+        status_code=429,
+        headers={"Retry-After": str(delivery.DISCORD_MAX_TOTAL_RETRY_WAIT_S + 1)},
+    )
+
+    ok = await deliver_discord("short digest", DiffResult(), _settings())
+
+    assert ok is False
+    assert waits == []
+    assert len(httpx_mock.get_requests()) == 1
+
+
+@pytest.mark.asyncio
+async def test_429_failure_log_does_not_leak_the_webhook(
+    httpx_mock: HTTPXMock, waits: list[float], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The webhook URL is the credential; the give-up path must not log it."""
+    httpx_mock.add_response(
+        url=WEBHOOK,
+        status_code=429,
+        headers={"Retry-After": "0"},
+        is_reusable=True,
+    )
+
+    ok = await deliver_discord("short digest", DiffResult(), _settings())
+
+    assert ok is False
+    captured = capsys.readouterr()
+    assert WEBHOOK not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("header", ["soon", "nan", "-3"])
+@pytest.mark.asyncio
+async def test_unparseable_retry_after_uses_the_default_wait(
+    httpx_mock: HTTPXMock, waits: list[float], header: str
+) -> None:
+    httpx_mock.add_response(
+        url=WEBHOOK, status_code=429, headers={"Retry-After": header}
+    )
+    httpx_mock.add_response(url=WEBHOOK, status_code=204)
+
+    ok = await deliver_discord("short digest", DiffResult(), _settings())
+
+    assert ok is True
+    assert waits == [delivery.DISCORD_DEFAULT_RETRY_WAIT_S]
+
+
+# ---------------------------------------------------------------------------
+# Part cap
+# ---------------------------------------------------------------------------
+
+
+def _many_sections(n: int) -> str:
+    return "".join(f"## S{i}\n\n" + ("y" * 50) + "\n\n" for i in range(n))
+
+
+def test_split_digest_caps_parts_with_an_omitted_tail() -> None:
+    """Past the cap, the last part states how many parts were dropped."""
+    digest = _many_sections(10)
+    uncapped = _split_digest(digest, max_chars=70, max_parts=0)
+    assert len(uncapped) == 10
+
+    capped = _split_digest(digest, max_chars=70, max_parts=4)
+
+    assert len(capped) == 4
+    assert capped[:3] == uncapped[:3]
+    assert "7 more part(s) omitted" in capped[3]
+    assert "4-part" in capped[3]
+
+
+def test_split_digest_at_the_cap_is_untouched() -> None:
+    digest = _many_sections(4)
+    assert _split_digest(digest, max_chars=70, max_parts=4) == _split_digest(
+        digest, max_chars=70, max_parts=0
+    )
+
+
+def test_default_cap_clears_the_realistic_worst_case() -> None:
+    """~17 parts is the known worst case; the default cap must not bind there."""
+    assert DISCORD_MAX_PARTS > 17
+
+
+def test_build_embeds_numbers_against_the_capped_total() -> None:
+    digest = "".join(
+        f"## S{i}\n\n" + ("z" * (DISCORD_MAX_DESCRIPTION - 20)) + "\n\n"
+        for i in range(DISCORD_MAX_PARTS + 5)
+    )
+    embeds = _build_embeds(digest, DiffResult())
+
+    assert len(embeds) == DISCORD_MAX_PARTS
+    assert embeds[-1]["title"].endswith(f"({DISCORD_MAX_PARTS}/{DISCORD_MAX_PARTS})")
+    assert "omitted" in embeds[-1]["description"]

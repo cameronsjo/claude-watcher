@@ -1,7 +1,13 @@
 """Tests for differ module."""
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
+
+from claude_watcher import differ
 from claude_watcher.differ import (
     DiffResult,
     _build_commit_message,
@@ -106,3 +112,95 @@ def test_build_commit_message_no_diff() -> None:
     """Gracefully handles missing diff."""
     msg = _build_commit_message("full", None)
     assert msg == "docs(full): update"
+
+
+def test_run_git_disables_detached_auto_maintenance(monkeypatch) -> None:
+    """Every git call runs auto-maintenance in the foreground (issue #6)."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(differ.subprocess, "run", fake_run)
+    differ._run_git(["status"], cwd=Path("."))
+
+    cmd = calls[0]
+    assert cmd[0] == "git"
+    assert cmd[-1] == "status"
+    assert "gc.autoDetach=false" in cmd
+    assert "maintenance.autoDetach=false" in cmd
+
+
+# Runs in its own interpreter: it makes itself a child subreaper, so any git
+# process that daemonizes is reparented to IT (standing in for the container's
+# PID 1) instead of to the real init, where the leak would be invisible.
+_ORPHAN_PROBE = r"""
+import ctypes, hashlib, os, pathlib, sys, time
+
+from claude_watcher import differ
+
+PR_SET_CHILD_SUBREAPER = 36
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+    print("SKIP"); sys.exit(0)
+
+repo = pathlib.Path(sys.argv[1])
+differ._ensure_git_repo(repo)
+# `git gc --auto` samples objects/17/: with gc.auto=1 two loose objects there
+# trip it. Write blobs whose ids start with 17 so the trigger is certain.
+differ._run_git(["config", "gc.auto", "1"], cwd=repo)
+found = i = 0
+while found < 3:
+    body = f"page {i}\n".encode()
+    i += 1
+    if hashlib.sha1(b"blob %d\0" % len(body) + body).hexdigest().startswith("17"):
+        (repo / f"p{found}.md").write_bytes(body)
+        found += 1
+differ._run_git(["add", "-A"], cwd=repo)
+differ.commit_snapshot(repo, "probe")
+
+me = os.getpid()
+orphans = set()
+deadline = time.monotonic() + 3
+while time.monotonic() < deadline:
+    for proc in pathlib.Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            stat = (proc / "stat").read_text()
+        except OSError:
+            continue
+        if int(stat.rsplit(")", 1)[1].split()[1]) == me:
+            orphans.add(proc.name)
+    time.sleep(0.05)
+for pid in orphans:
+    try:
+        os.waitpid(int(pid), 0)
+    except ChildProcessError:
+        pass
+print(len(orphans))
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="needs prctl")
+def test_commit_leaves_no_orphaned_git_process(tmp_path: Path) -> None:
+    """A commit that trips auto-gc must not leave a detached git behind.
+
+    Before the fix, git daemonized its auto-gc; the daemon was reparented to
+    PID 1 and, with the app as PID 1, became a zombie nobody reaped.
+    """
+    src = Path(differ.__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": str(src)}
+    result = subprocess.run(
+        [sys.executable, "-c", _ORPHAN_PROBE, str(tmp_path / "repo")],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=True,
+    )
+    last = result.stdout.strip().splitlines()[-1]
+    if last == "SKIP":
+        pytest.skip("cannot become a child subreaper here")
+    assert last == "0", result.stdout + result.stderr

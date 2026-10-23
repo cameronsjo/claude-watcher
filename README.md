@@ -49,7 +49,8 @@ actually change, and steady-state runs only diff genuine changes.
 - [uv](https://docs.astral.sh/uv/) for dependency management
 - Discord webhook URL
 - SMTP credentials for email delivery
-- Anthropic API key
+- An OpenAI-compatible LLM endpoint and its API key (optional — without a key the
+  digest is the plain changed-page list)
 
 ### Install
 
@@ -81,6 +82,46 @@ make start
 make docker-build
 make docker-run
 ```
+
+### LLM endpoint
+
+The summarizer speaks the OpenAI chat-completions dialect to whatever
+`WATCHER_LLM_BASE_URL` points at, so it can be routed through any compatible
+gateway or proxy (cost attribution, central rate limits, one credential to
+rotate, provider failover) without a code change. Unset (not empty), it uses the
+default below.
+
+| Variable | Default | Description |
+|---|---|---|
+| `WATCHER_LLM_BASE_URL` | `http://agentgateway:8082/v1` | Base URL of the OpenAI-compatible endpoint |
+| `WATCHER_LLM_API_KEY` | _(empty)_ | Key for that endpoint; empty disables summarization |
+| `WATCHER_LLM_MAP_MODEL` / `WATCHER_LLM_REDUCE_MODEL` | `local/Qwen3.8-27B-Heretic-RVN-Q4_K_M` | Model ids, as the endpoint names them |
+
+`ANTHROPIC_BASE_URL` is deliberately **not** read. It names an Anthropic
+Messages-API endpoint, which this client does not speak, and it is often
+exported globally for other tools — honoring it would silently reroute the
+watcher.
+
+To use Anthropic's own OpenAI-compatible endpoint, change the model ids as well
+as the URL — the default ids name a local preset Anthropic does not serve, so
+leaving them in place makes every call 404 and the digest silently degrades to
+the plain changed-page list:
+
+```bash
+WATCHER_LLM_BASE_URL=https://api.anthropic.com/v1/
+WATCHER_LLM_API_KEY=sk-ant-...
+WATCHER_LLM_MAP_MODEL=claude-sonnet-4-6
+WATCHER_LLM_REDUCE_MODEL=claude-sonnet-4-6
+```
+
+Pick a model that accepts `temperature` below 1: the summarizer sends a fixed
+`temperature=0.2`, and Anthropic's endpoint rejects that with a 400 on Claude
+Opus 4.7 and every later model, so `claude-sonnet-4-6` (or
+`claude-haiku-4-5`) works where `claude-sonnet-5-5` does not. The endpoint
+ignores `reasoning_effort`, so `WATCHER_LLM_REASONING_EFFORT` can stay as is.
+Keep `WATCHER_LLM_BASE_URL` unset or set, never empty: an empty value is an
+invalid endpoint, not the default. Use `https://` for any endpoint off the
+cluster, and keep credentials out of the URL itself.
 
 ## Schedule
 

@@ -1,6 +1,6 @@
 # claude-watcher
 
-Self-hosted documentation watcher for Claude Code. Polls all Claude Code documentation pages, diffs against last known state (stored as git commits), summarizes changes via Claude API, and delivers digests to Discord and email.
+Self-hosted documentation watcher for Claude Code. Polls all Claude Code documentation pages, diffs against last known state (stored as git commits), summarizes changes via an OpenAI-compatible LLM endpoint, and delivers digests to Discord and email.
 
 ## Stack
 
@@ -29,7 +29,7 @@ src/claude_watcher/
 ├── main.py           # Entry point, scheduler setup
 ├── fetcher.py        # Async page fetching from llms.txt + raw GitHub
 ├── differ.py         # Git diff operations, detect new/removed pages
-├── summarizer.py     # Claude API digest generation
+├── summarizer.py     # LLM digest generation (via llm.py)
 ├── delivery.py       # Discord webhook + email sending
 └── config.py         # Pydantic Settings, env var config
 snapshots/            # Git-tracked fetched pages (the state store)

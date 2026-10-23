@@ -11,6 +11,7 @@ from claude_watcher.llm import (
     LLMError,
     complete,
     fit_sections,
+    redact_url,
 )
 
 
@@ -100,6 +101,31 @@ async def test_client_is_built_with_the_unwrapped_secret() -> None:
         max_retries=settings.summarizer_max_retries,
     )
     assert (text, tokens_in, tokens_out) == ("hi", 3, 4)
+
+
+@pytest.mark.asyncio
+async def test_base_url_override_reaches_the_client(monkeypatch) -> None:
+    """An env-set base URL is what the SDK client is constructed with."""
+    monkeypatch.setenv("WATCHER_LLM_BASE_URL", "https://proxy.example/v1")
+    settings = Settings(
+        llm_api_key="gw-test-key",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+
+    response = MagicMock()
+    response.choices = [MagicMock(message=MagicMock(content="hi"))]
+    response.usage = MagicMock(prompt_tokens=1, completion_tokens=1)
+
+    async def create(**kwargs):
+        return response
+
+    client = MagicMock()
+    client.chat.completions.create = create
+
+    with patch("claude_watcher.llm.openai.AsyncOpenAI", return_value=client) as cls:
+        await complete("sys", "user", 16, model="local/x", settings=settings)
+
+    assert cls.call_args.kwargs["base_url"] == "https://proxy.example/v1"
 
 
 def test_secret_key_does_not_render_in_settings_repr() -> None:
@@ -208,3 +234,52 @@ async def test_reasoning_effort_is_omitted_when_blank() -> None:
         await complete("s", "u", 64, model="local/x", settings=settings)
 
     assert create.kwargs["extra_body"] == {}
+
+
+def test_redact_url_strips_userinfo() -> None:
+    assert redact_url("https://user:hunter2@proxy.example:8443/v1") == (
+        "https://proxy.example:8443/v1"
+    )
+    assert redact_url("https://tok@proxy.example/v1") == "https://proxy.example/v1"
+
+
+def test_redact_url_leaves_a_plain_url_alone() -> None:
+    assert redact_url("http://agentgateway:8082/v1") == "http://agentgateway:8082/v1"
+
+
+@pytest.mark.asyncio
+async def test_url_credentials_never_reach_the_log_on_a_failed_call() -> None:
+    """The not-found and unreachable branches log the base URL — redacted."""
+    import httpx
+    import openai
+    from structlog.testing import capture_logs
+
+    settings = Settings(
+        llm_api_key="k",
+        llm_base_url="https://user:hunter2@proxy.example/v1",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    request = httpx.Request("POST", "https://proxy.example/v1/chat/completions")
+    errors = [
+        openai.NotFoundError(
+            "nope", response=httpx.Response(404, request=request), body=None
+        ),
+        openai.APIConnectionError(request=request),
+    ]
+    for exc in errors:
+
+        async def create(_exc=exc, **kwargs):
+            raise _exc
+
+        client = MagicMock()
+        client.chat.completions.create = create
+        with (
+            patch("claude_watcher.llm.openai.AsyncOpenAI", return_value=client),
+            capture_logs() as logs,
+            pytest.raises(LLMError),
+        ):
+            await complete("sys", "user", 16, model="m", settings=settings)
+
+        assert logs, "expected a log record for the failure"
+        assert "hunter2" not in repr(logs)
+        assert logs[0]["base_url"] == "https://proxy.example/v1"

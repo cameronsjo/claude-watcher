@@ -8,6 +8,7 @@ inference. Keeping one shim means the next provider swap touches one file.
 
 import hashlib
 
+import httpx
 import openai
 import structlog
 
@@ -41,6 +42,22 @@ _TEMPERATURE = 0.2
 # constructing a client (and its connection pool) per call would leak pools in
 # a process that runs for weeks.
 _client_cache: dict[tuple[str, str, int], openai.AsyncOpenAI] = {}
+
+
+def redact_url(url: str) -> str:
+    """Return `url` with any userinfo (``user:pass@``) removed, for logging.
+
+    Some proxies take credentials in the URL itself; logging the base URL
+    verbatim would write them to the log stream.
+    """
+    try:
+        parsed = httpx.URL(url)
+    except (httpx.InvalidURL, TypeError):
+        # Unparseable: say nothing about it rather than risk echoing a secret.
+        return "<unparseable url>"
+    if not parsed.userinfo:
+        return url
+    return str(parsed.copy_with(username=None, password=None))
 
 
 def reset_client_cache() -> None:
@@ -114,7 +131,7 @@ async def complete(
         logger.error(
             "LLM model not found — permanent error, check the model id.",
             model=model,
-            base_url=settings.llm_base_url,
+            base_url=redact_url(settings.llm_base_url),
             error=str(exc),
         )
         raise
@@ -137,7 +154,7 @@ async def complete(
         logger.warning(
             "LLM endpoint unreachable — the summarizer will degrade.",
             model=model,
-            base_url=settings.llm_base_url,
+            base_url=redact_url(settings.llm_base_url),
             error=str(exc),
         )
         raise

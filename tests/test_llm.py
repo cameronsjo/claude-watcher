@@ -283,3 +283,68 @@ async def test_url_credentials_never_reach_the_log_on_a_failed_call() -> None:
         assert logs, "expected a log record for the failure"
         assert "hunter2" not in repr(logs)
         assert logs[0]["base_url"] == "https://proxy.example/v1"
+
+
+# ---------------------------------------------------------------------------
+# Temperature — sent when set, omitted entirely when unset (CAM-226).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_default_temperature_is_sent() -> None:
+    """The local gateway keeps the 0.2 every deployment has run with."""
+    settings = Settings(llm_api_key="k", _env_file=None)  # type: ignore[call-arg]
+    patcher, create = _patched(_choice("ok"))
+
+    with patcher:
+        await complete("sys", "user", 64, model="local/x", settings=settings)
+
+    assert create.kwargs["temperature"] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_explicit_temperature_is_sent() -> None:
+    settings = Settings(
+        llm_api_key="k",
+        llm_temperature=0.7,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    patcher, create = _patched(_choice("ok"))
+
+    with patcher:
+        await complete("sys", "user", 64, model="local/x", settings=settings)
+
+    assert create.kwargs["temperature"] == 0.7
+
+
+@pytest.mark.asyncio
+async def test_unset_temperature_is_omitted_from_the_request() -> None:
+    """Anthropic's endpoint 400s on temperature < 1 for Opus 4.7 and later.
+
+    The key must be absent, not sent as None — the SDK would serialize an
+    explicit None differently from its own NOT_GIVEN sentinel.
+    """
+    settings = Settings(
+        llm_api_key="k",
+        llm_temperature=None,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    patcher, create = _patched(_choice("ok"))
+
+    with patcher:
+        await complete("sys", "user", 64, model="claude-sonnet-5-5", settings=settings)
+
+    assert "temperature" not in create.kwargs
+
+
+@pytest.mark.asyncio
+async def test_empty_temperature_env_omits_it_from_the_request(monkeypatch) -> None:
+    """The documented Anthropic recipe: `WATCHER_LLM_TEMPERATURE=` (empty)."""
+    monkeypatch.setenv("WATCHER_LLM_TEMPERATURE", "")
+    settings = Settings(llm_api_key="k", _env_file=None)  # type: ignore[call-arg]
+    patcher, create = _patched(_choice("ok"))
+
+    with patcher:
+        await complete("sys", "user", 64, model="claude-sonnet-5-5", settings=settings)
+
+    assert "temperature" not in create.kwargs

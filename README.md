@@ -96,6 +96,7 @@ default below.
 | `WATCHER_LLM_BASE_URL` | `http://agentgateway:8082/v1` | Base URL of the OpenAI-compatible endpoint |
 | `WATCHER_LLM_API_KEY` | _(empty)_ | Key for that endpoint; empty disables summarization |
 | `WATCHER_LLM_MAP_MODEL` / `WATCHER_LLM_REDUCE_MODEL` | `local/Qwen3.8-27B-Heretic-RVN-Q4_K_M` | Model ids, as the endpoint names them |
+| `WATCHER_LLM_TEMPERATURE` | `0.2` | Sent as `temperature`; set to empty to leave it out of the request |
 
 `ANTHROPIC_BASE_URL` is deliberately **not** read. It names an Anthropic
 Messages-API endpoint, which this client does not speak, and it is often
@@ -110,14 +111,15 @@ the plain changed-page list:
 ```bash
 WATCHER_LLM_BASE_URL=https://api.anthropic.com/v1/
 WATCHER_LLM_API_KEY=sk-ant-...
-WATCHER_LLM_MAP_MODEL=claude-sonnet-4-6
-WATCHER_LLM_REDUCE_MODEL=claude-sonnet-4-6
+WATCHER_LLM_MAP_MODEL=claude-sonnet-5-5
+WATCHER_LLM_REDUCE_MODEL=claude-sonnet-5-5
+WATCHER_LLM_TEMPERATURE=
 ```
 
-Pick a model that accepts `temperature` below 1: the summarizer sends a fixed
-`temperature=0.2`, and Anthropic's endpoint rejects that with a 400 on Claude
-Opus 4.7 and every later model, so `claude-sonnet-4-6` (or
-`claude-haiku-4-5`) works where `claude-sonnet-5-5` does not. The endpoint
+The empty `WATCHER_LLM_TEMPERATURE` matters: it leaves `temperature` out of the
+request. Left unset, the summarizer sends its default `temperature=0.2`, which
+Anthropic's endpoint rejects with a 400 on Claude Opus 4.7 and every later
+model, `claude-sonnet-5-5` and `claude-haiku-5-5` included. The endpoint
 ignores `reasoning_effort`, so `WATCHER_LLM_REASONING_EFFORT` can stay as is.
 Keep `WATCHER_LLM_BASE_URL` unset or set, never empty: an empty value is an
 invalid endpoint, not the default. Use `https://` for any endpoint off the

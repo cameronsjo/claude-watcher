@@ -115,6 +115,26 @@ def test_llm_gateway_defaults() -> None:
     assert settings.llm_map_model.startswith("local/")
 
 
+def test_llm_temperature_defaults_to_the_gateway_value() -> None:
+    """Existing deployments keep sending 0.2 without touching their env."""
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.llm_temperature == 0.2
+
+
+def test_llm_temperature_is_read_from_the_env(monkeypatch) -> None:
+    monkeypatch.setenv("WATCHER_LLM_TEMPERATURE", "1")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.llm_temperature == 1.0
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_blank_llm_temperature_means_unset(monkeypatch, value) -> None:
+    """An empty value means "omit the parameter", not a parse error."""
+    monkeypatch.setenv("WATCHER_LLM_TEMPERATURE", value)
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.llm_temperature is None
+
+
 def test_summarizer_enabled_reads_the_gateway_key() -> None:
     settings = Settings(
         llm_api_key="gw-test-key",

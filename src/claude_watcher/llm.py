@@ -33,11 +33,6 @@ class EmptyCompletionError(LLMError):
     """
 
 
-# Summarization is an extraction task, not a creative one. No call site set a
-# temperature before, so all five silently inherited the previous provider's
-# default of 1.0 — that is not a dependency worth carrying to a new backend.
-_TEMPERATURE = 0.2
-
 # One client per distinct endpoint config. A full-docs run makes ~130 calls;
 # constructing a client (and its connection pool) per call would leak pools in
 # a process that runs for weeks.
@@ -112,16 +107,25 @@ async def complete(
     if settings.llm_reasoning_effort:
         extra_body["reasoning_effort"] = settings.llm_reasoning_effort
 
+    # Summarization is an extraction task, so the default is a low temperature
+    # (`Settings.llm_temperature`). Unset, the key is left out of the request
+    # altogether rather than sent as null: Anthropic's OpenAI-compatible
+    # endpoint 400s on any temperature below 1 for Opus 4.7 and later, and
+    # omitting it is the only value every backend accepts.
+    sampling: dict = {}
+    if settings.llm_temperature is not None:
+        sampling["temperature"] = settings.llm_temperature
+
     try:
         response = await client.chat.completions.create(
             model=model,
             max_tokens=max_tokens,
-            temperature=_TEMPERATURE,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
             extra_body=extra_body,
+            **sampling,
         )
     # NotFoundError and RateLimitError are both APIStatusError subclasses, so
     # they must be caught first. A 404 from a mistyped or unrouted model id is

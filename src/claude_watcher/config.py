@@ -54,6 +54,25 @@ class Settings(BaseSettings):
     # summarization call can spend its entire budget and return "". Set to ""
     # for a backend that rejects the parameter.
     llm_reasoning_effort: str = "none"
+    # Sent as `temperature` when set. Summarization is extraction, not creative
+    # writing, so the local gateway gets 0.2 by default — the value every
+    # deployment has run with. Set to "" to omit the parameter entirely, which
+    # is what a backend that rejects it needs: Anthropic's OpenAI-compatible
+    # endpoint returns 400 for any temperature below 1 on Claude Opus 4.7 and
+    # every later model.
+    llm_temperature: float | None = 0.2
+
+    @field_validator("llm_temperature", mode="before")
+    @classmethod
+    def blank_temperature_is_unset(cls, v: object) -> object:
+        """Map an empty or whitespace-only value to None (omit the parameter).
+
+        Mirrors `llm_reasoning_effort`, where "" also means "do not send it".
+        Without this, an empty env var fails float parsing at startup.
+        """
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     # Output budgets. These are the model's whole allowance, thinking included
     # — the previous 1024/512 pair was set against a provider that did not

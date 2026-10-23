@@ -63,3 +63,52 @@ async def test_seed_baseline_no_pages_skips_commit(monkeypatch, tmp_path: Path) 
     await main_module._seed_baseline(settings)
 
     fake_commit.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("utc", "expected"),
+    [
+        ("2026-10-24T01:00:00", True),  # Fri 19:00 CST, Sat in UTC
+        ("2026-10-26T01:00:00", False),  # Sun 19:00 CST, Mon in UTC
+        ("2026-10-26T16:00:00", True),  # Mon 10:00 CST
+        ("2026-10-26T15:59:00", False),  # Mon 09:59 CST
+        ("2026-10-27T03:00:00", False),  # Mon 21:00 CST
+    ],
+)
+def test_is_peak_hours_reads_the_cst_weekday(utc: str, expected: bool) -> None:
+    from datetime import UTC, datetime
+
+    now = datetime.fromisoformat(utc).replace(tzinfo=UTC)
+    assert main_module._is_peak_hours(now) is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first", ["full", "changelog"])
+async def test_pipeline_runs_do_not_overlap(
+    monkeypatch, tmp_path: Path, first: str
+) -> None:
+    """A changelog run waits for an in-flight docs run instead of interleaving."""
+    import asyncio
+
+    settings = Settings(
+        snapshots_dir=tmp_path,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    events: list[str] = []
+
+    async def fake_fetch(_client, _settings):
+        events.append("fetch")
+        await asyncio.sleep(0.05)
+        events.append("fetched")
+        return FetchResult()
+
+    monkeypatch.setattr(main_module, "fetch_all_docs", fake_fetch)
+    monkeypatch.setattr(main_module, "fetch_changelog", fake_fetch)
+
+    second = "changelog" if first == "full" else "full"
+    await asyncio.gather(
+        main_module._run_pipeline(first, settings),
+        main_module._run_pipeline(second, settings),
+    )
+
+    assert events == ["fetch", "fetched", "fetch", "fetched"]

@@ -142,3 +142,121 @@ async def test_fetch_all_docs_multi_source(httpx_mock, tmp_path: Path) -> None:
     # Report names keep the sources distinct
     assert "docs__shared.md" in result.fetched_pages
     assert f"{API_DOCS_SUBDIR}/docs__shared.md" in result.fetched_pages
+
+
+async def test_fetch_all_docs_removes_pages_dropped_from_index(
+    httpx_mock, tmp_path: Path
+) -> None:
+    """A page no longer in llms.txt loses its snapshot, so the differ reports it."""
+    settings = Settings(
+        snapshots_dir=tmp_path,
+        docs_base_url="https://docs.test.com",
+        api_docs_base_url="",
+        changelog_url="https://raw.test.com/CHANGELOG.md",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    (tmp_path / "en__hooks.md").write_text("old hooks")
+    (tmp_path / "en__gone.md").write_text("dropped page")
+    (tmp_path / "CHANGELOG.md").write_text("changelog")
+    (tmp_path / "api-docs").mkdir()
+    (tmp_path / "api-docs" / "docs__en__api.md").write_text("api page")
+
+    httpx_mock.add_response(
+        url="https://docs.test.com/llms.txt",
+        text="- [Hooks](https://docs.test.com/en/hooks): Hook reference.\n",
+    )
+    httpx_mock.add_response(url="https://docs.test.com/en/hooks", text="# Hooks")
+    import httpx
+
+    async with httpx.AsyncClient() as client:
+        await fetch_all_docs(client, settings)
+
+    assert not (tmp_path / "en__gone.md").exists()
+    assert (tmp_path / "en__hooks.md").read_text() == "# Hooks"
+    # The changelog job's file and another source's subdirectory are untouched.
+    assert (tmp_path / "CHANGELOG.md").exists()
+    assert (tmp_path / "api-docs" / "docs__en__api.md").exists()
+
+
+async def test_fetch_all_docs_empty_index_keeps_snapshots(
+    httpx_mock, tmp_path: Path
+) -> None:
+    """An index with no pages is a bad read, not every page removed."""
+    settings = Settings(
+        snapshots_dir=tmp_path,
+        docs_base_url="https://docs.test.com",
+        api_docs_base_url="",
+        changelog_url="https://raw.test.com/CHANGELOG.md",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    (tmp_path / "en__hooks.md").write_text("hooks")
+    httpx_mock.add_response(url="https://docs.test.com/llms.txt", text="# Empty\n")
+    import httpx
+
+    async with httpx.AsyncClient() as client:
+        await fetch_all_docs(client, settings)
+
+    assert (tmp_path / "en__hooks.md").exists()
+
+
+async def test_api_docs_pages_dropped_from_their_index_are_removed(
+    httpx_mock, tmp_path: Path
+) -> None:
+    """The API source sweeps its own subdirectory, including names with no __."""
+    settings = Settings(
+        snapshots_dir=tmp_path,
+        docs_base_url="https://docs.test.com",
+        api_docs_base_url="https://api.test.com",
+        changelog_url="https://raw.test.com/CHANGELOG.md",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    api = tmp_path / "api-docs"
+    api.mkdir()
+    (api / "docs__en__kept.md").write_text("kept")
+    (api / "api.test.com.md").write_text("dropped root page")
+
+    httpx_mock.add_response(
+        url="https://docs.test.com/llms.txt",
+        text="- [Hooks](https://docs.test.com/en/hooks): Hooks.\n",
+    )
+    httpx_mock.add_response(url="https://docs.test.com/en/hooks", text="# Hooks")
+    httpx_mock.add_response(
+        url="https://api.test.com/llms.txt",
+        text="- [Kept](https://api.test.com/docs/en/kept): Kept.\n",
+    )
+    httpx_mock.add_response(url="https://api.test.com/docs/en/kept", text="# Kept")
+    import httpx
+
+    async with httpx.AsyncClient() as client:
+        await fetch_all_docs(client, settings)
+
+    assert (api / "docs__en__kept.md").exists()
+    assert not (api / "api.test.com.md").exists()
+
+
+async def test_index_that_would_remove_many_pages_keeps_snapshots(
+    httpx_mock, tmp_path: Path
+) -> None:
+    """A truncated or restructured index is a bad read, not a mass deletion."""
+    from claude_watcher.fetcher import MAX_REMOVALS_PER_RUN
+
+    settings = Settings(
+        snapshots_dir=tmp_path,
+        docs_base_url="https://docs.test.com",
+        api_docs_base_url="",
+        changelog_url="https://raw.test.com/CHANGELOG.md",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    for i in range(MAX_REMOVALS_PER_RUN + 1):
+        (tmp_path / f"en__page{i}.md").write_text("page")
+    httpx_mock.add_response(
+        url="https://docs.test.com/llms.txt",
+        text="- [Hooks](https://docs.test.com/en/hooks): Hooks.\n",
+    )
+    httpx_mock.add_response(url="https://docs.test.com/en/hooks", text="# Hooks")
+    import httpx
+
+    async with httpx.AsyncClient() as client:
+        await fetch_all_docs(client, settings)
+
+    assert len(list(tmp_path.glob("en__page*.md"))) == MAX_REMOVALS_PER_RUN + 1

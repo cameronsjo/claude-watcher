@@ -27,6 +27,22 @@ DISCORD_MAX_DESCRIPTION = 4000
 # Discord webhooks rate-limit at roughly 5 requests per 2 seconds.
 DISCORD_POST_INTERVAL_S = 0.5
 
+# A 429 is retried for the part that drew it, after the wait Discord asks for.
+# Both bounds are explicit so a hostile or confused `Retry-After` cannot park
+# the scheduler: past either one, delivery fails and the snapshot is kept.
+DISCORD_MAX_RETRIES_PER_PART = 3
+DISCORD_MAX_TOTAL_RETRY_WAIT_S = 60.0
+# Used when a 429 carries no parseable wait at all.
+DISCORD_DEFAULT_RETRY_WAIT_S = 1.0
+
+# Hard cap on parts per digest. The worst realistic digest — the fallback page
+# list over the ~1,700-page API docs index — is about 17 parts, so this only
+# binds if an upstream bound (model max_tokens, index size) moves.
+DISCORD_MAX_PARTS = 20
+_OMITTED_NOTICE = (
+    "*{n} more part(s) omitted — this digest exceeded the {cap}-part Discord cap.*"
+)
+
 # Split points, both zero-width lookarounds so the pieces concatenate back to
 # the original digest byte-for-byte.
 _HEADING_BOUNDARY = re.compile(r"(?=^#{2,3} )", re.MULTILINE)
@@ -89,12 +105,23 @@ def _hard_split(text: str, max_chars: int) -> list[str]:
     return pieces
 
 
-def _split_digest(summary: str, max_chars: int = DISCORD_MAX_DESCRIPTION) -> list[str]:
+async def _sleep(seconds: float) -> None:
+    """Indirection so tests can observe waits without patching asyncio itself."""
+    await asyncio.sleep(seconds)
+
+
+def _split_digest(
+    summary: str,
+    max_chars: int = DISCORD_MAX_DESCRIPTION,
+    max_parts: int = DISCORD_MAX_PARTS,
+) -> list[str]:
     """Split a digest into ordered parts, each under `max_chars`.
 
     Prefers heading boundaries, falls back to paragraph breaks, and hard-splits
-    only a single section that is oversized on its own. Nothing is dropped —
-    absent a hard split the parts concatenate back to the input exactly.
+    only a single section that is oversized on its own. Below `max_parts`
+    nothing is dropped — absent a hard split the parts concatenate back to the
+    input exactly. Above it, the tail is replaced by one part that says how
+    many parts were omitted, so a cut digest never reads as a complete one.
     """
     if not summary.strip():
         return []
@@ -122,7 +149,48 @@ def _split_digest(summary: str, max_chars: int = DISCORD_MAX_DESCRIPTION) -> lis
             current += section
     if current:
         chunks.append(current)
-    return chunks
+    return _cap_parts(chunks, max_parts)
+
+
+def _cap_parts(chunks: list[str], max_parts: int) -> list[str]:
+    """Keep the first `max_parts - 1` parts and state how many were dropped."""
+    if max_parts < 1 or len(chunks) <= max_parts:
+        return chunks
+    kept = max(max_parts - 1, 0)
+    omitted = len(chunks) - kept
+    logger.warning(
+        "Digest exceeds the Discord part cap; omitting the tail.",
+        parts=len(chunks),
+        cap=max_parts,
+        omitted=omitted,
+    )
+    return [*chunks[:kept], _OMITTED_NOTICE.format(n=omitted, cap=max_parts)]
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """The wait a 429 asks for, in seconds, or None when it names none.
+
+    Discord sends both a `Retry-After` header and a `retry_after` JSON field,
+    each in (possibly fractional) seconds. Header first; body as a fallback.
+    """
+    raw: object = response.headers.get("Retry-After")
+    if raw is None:
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict):
+            raw = body.get("retry_after")
+    if raw is None:
+        return None
+    try:
+        wait = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    # NaN fails every comparison, so it would sail through the budget check.
+    if wait != wait or wait < 0:
+        return None
+    return wait
 
 
 def _build_embeds(summary: str, diff: DiffResult) -> list[dict]:
@@ -169,31 +237,64 @@ async def deliver_discord(
         return False
 
     total = len(embeds)
+    retry_wait_spent = 0.0
     async with httpx.AsyncClient() as client:
         # Sequential by construction — out-of-order parts are worse than the
         # truncation this replaced, so never gather these.
         for n, embed in enumerate(embeds, start=1):
-            try:
-                response = await client.post(
-                    settings.discord_webhook_url, json={"embeds": [embed]}
-                )
-                response.raise_for_status()
-            except httpx.HTTPError as exc:
-                # NOT `str(exc)`: httpx renders the full request URL in its
-                # message, and the webhook URL IS the credential — anyone
-                # holding it can post to the channel as this bot.
-                logger.error(
-                    "Discord delivery failed part-way; digest is incomplete.",
-                    part=n,
-                    of=total,
-                    error_type=type(exc).__name__,
-                    status_code=getattr(
-                        getattr(exc, "response", None), "status_code", None
-                    ),
-                )
-                return False
+            retries = 0
+            while True:
+                try:
+                    response = await client.post(
+                        settings.discord_webhook_url, json={"embeds": [embed]}
+                    )
+                    if response.status_code == 429:
+                        wait = _retry_after_seconds(response)
+                        if wait is None:
+                            wait = DISCORD_DEFAULT_RETRY_WAIT_S
+                        over_budget = (
+                            retry_wait_spent + wait > DISCORD_MAX_TOTAL_RETRY_WAIT_S
+                        )
+                        if retries < DISCORD_MAX_RETRIES_PER_PART and not over_budget:
+                            # Retry THIS part only. Parts already delivered are
+                            # never re-posted within a run.
+                            retries += 1
+                            retry_wait_spent += wait
+                            logger.warning(
+                                "Discord rate-limited a part; waiting to retry it.",
+                                part=n,
+                                of=total,
+                                retry=retries,
+                                wait_s=wait,
+                            )
+                            await _sleep(wait)
+                            continue
+                        logger.error(
+                            "Discord rate limit outlasted the retry budget.",
+                            part=n,
+                            of=total,
+                            retries=retries,
+                            requested_wait_s=wait,
+                            waited_s=retry_wait_spent,
+                        )
+                    response.raise_for_status()
+                except httpx.HTTPError as exc:
+                    # NOT `str(exc)`: httpx renders the full request URL in its
+                    # message, and the webhook URL IS the credential — anyone
+                    # holding it can post to the channel as this bot.
+                    logger.error(
+                        "Discord delivery failed part-way; digest is incomplete.",
+                        part=n,
+                        of=total,
+                        error_type=type(exc).__name__,
+                        status_code=getattr(
+                            getattr(exc, "response", None), "status_code", None
+                        ),
+                    )
+                    return False
+                break
             if n < total:
-                await asyncio.sleep(DISCORD_POST_INTERVAL_S)
+                await _sleep(DISCORD_POST_INTERVAL_S)
 
     logger.info("Delivered digest to Discord.", parts=total)
     return True

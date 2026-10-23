@@ -23,12 +23,28 @@ class DiffResult:
         return bool(self.new_pages or self.removed_pages or self.modified_pages)
 
 
+# `git commit`, `git add` and friends may kick off auto-maintenance (`git gc
+# --auto` / `git maintenance run --auto`), which by default DAEMONIZES: git
+# forks, the foreground git exits, and the background one is reparented to PID
+# 1. subprocess.run reaps the git it started, but never that grandchild — and
+# in the container PID 1 was the app, which never calls wait(), so each
+# detached maintenance run left a zombie `git` behind (issue #6). Running the
+# maintenance in the foreground keeps every git process inside the child we
+# wait on. The Dockerfile also ships tini as PID 1 as a backstop.
+_GIT_NO_DETACH = ("-c", "gc.autoDetach=false", "-c", "maintenance.autoDetach=false")
+
+
 def _run_git(
     args: list[str], cwd: Path, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
-    """Run a git command in the given directory."""
+    """Run a git command in the given directory.
+
+    Always `subprocess.run`: it waits on the child on every path, including
+    when it raises (CalledProcessError is built after the child is reaped).
+    Never swap in a bare Popen here.
+    """
     return subprocess.run(
-        ["git", *args],
+        ["git", *_GIT_NO_DETACH, *args],
         cwd=cwd,
         capture_output=True,
         text=True,

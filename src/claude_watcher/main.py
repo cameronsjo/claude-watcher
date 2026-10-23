@@ -14,7 +14,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from claude_watcher.config import Settings
 from claude_watcher.delivery import deliver
 from claude_watcher.differ import DiffResult, commit_snapshot, compute_diff
-from claude_watcher.drift_checker import check_drift
+from claude_watcher.drift_checker import check_drift, check_mapping_reachability
 from claude_watcher.fetcher import fetch_all_docs, fetch_changelog
 from claude_watcher.summarizer import summarize_diff
 
@@ -145,6 +145,11 @@ async def check_docs(settings: Settings) -> None:
 
 async def run_scheduler(settings: Settings) -> None:
     """Start the APScheduler with two jobs."""
+    if settings.drift_check_active:
+        # Log any mapped ecosystem file that is already unreachable, so a stale
+        # mapping is visible at startup rather than after the next docs change.
+        await check_mapping_reachability(settings)
+
     scheduler = AsyncIOScheduler()
 
     # CHANGELOG check — adaptive interval based on peak/off-peak

@@ -3,12 +3,19 @@
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import openai
 import pytest
 
 from claude_watcher.config import Settings
 from claude_watcher.differ import DiffResult
-from claude_watcher.drift_checker import _is_no_drift, _load_mappings, check_drift
+from claude_watcher.drift_checker import (
+    _fetch_ecosystem_file,
+    _is_no_drift,
+    _load_mappings,
+    check_drift,
+    check_mapping_reachability,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -517,3 +524,168 @@ async def test_budgets_reach_the_llm_call(tmp_path: Path, httpx_mock) -> None:
 
     assert result is not None
     assert seen == [777, 8888]
+
+
+# ---------------------------------------------------------------------------
+# GitHub auth on ecosystem fetches (issue #15)
+# ---------------------------------------------------------------------------
+
+_TOKEN = "github_pat_test_SECRET_value"
+_CONTENTS_URL = (
+    "https://api.github.com/repos/cameronsjo/cadence/contents/"
+    "plugins/cadence/skills/writing-hooks/SKILL.md?ref=main"
+)
+
+
+@pytest.mark.asyncio
+async def test_token_is_sent_as_bearer_with_the_raw_media_type(
+    tmp_path: Path, httpx_mock
+) -> None:
+    httpx_mock.add_response(
+        url=_CONTENTS_URL,
+        match_headers={
+            "Authorization": f"Bearer {_TOKEN}",
+            "Accept": "application/vnd.github.raw+json",
+        },
+        text="# Writing Hooks",
+    )
+    settings = _settings(tmp_path, github_token=_TOKEN)
+
+    async with httpx.AsyncClient() as client:
+        text = await _fetch_ecosystem_file(client, _CONTENTS_URL, settings)
+
+    assert text == "# Writing Hooks"
+
+
+@pytest.mark.asyncio
+async def test_raw_githubusercontent_also_gets_the_token(
+    tmp_path: Path, httpx_mock
+) -> None:
+    url = "https://raw.githubusercontent.com/cameronsjo/cadence/main/README.md"
+    httpx_mock.add_response(
+        url=url, match_headers={"Authorization": f"Bearer {_TOKEN}"}, text="ok"
+    )
+    settings = _settings(tmp_path, github_token=_TOKEN)
+
+    async with httpx.AsyncClient() as client:
+        assert await _fetch_ecosystem_file(client, url, settings) == "ok"
+
+
+@pytest.mark.asyncio
+async def test_token_is_never_sent_to_a_non_github_host(
+    tmp_path: Path, httpx_mock
+) -> None:
+    """A mapping entry pointing elsewhere must not collect the credential."""
+    url = "https://raw.example.com/hooks-skill.md"
+    httpx_mock.add_response(url=url, text="body")
+    settings = _settings(tmp_path, github_token=_TOKEN)
+
+    async with httpx.AsyncClient() as client:
+        await _fetch_ecosystem_file(client, url, settings)
+
+    (request,) = httpx_mock.get_requests()
+    assert "Authorization" not in request.headers
+
+
+@pytest.mark.asyncio
+async def test_no_token_sends_no_authorization(tmp_path: Path, httpx_mock) -> None:
+    httpx_mock.add_response(url=_CONTENTS_URL, text="public")
+    settings = _settings(tmp_path)
+
+    async with httpx.AsyncClient() as client:
+        await _fetch_ecosystem_file(client, _CONTENTS_URL, settings)
+
+    (request,) = httpx_mock.get_requests()
+    assert "Authorization" not in request.headers
+    assert request.headers["Accept"] == "application/vnd.github.raw+json"
+
+
+@pytest.mark.asyncio
+async def test_token_never_reaches_logs_or_repr(
+    tmp_path: Path, httpx_mock, capsys: pytest.CaptureFixture[str]
+) -> None:
+    httpx_mock.add_response(url=_CONTENTS_URL, status_code=404)
+    settings = _settings(tmp_path, github_token=_TOKEN)
+    (tmp_path / "drift-mappings.yaml").write_text(
+        f"docs__en__hooks.md:\n  - {_CONTENTS_URL}\n"
+    )
+
+    async with httpx.AsyncClient() as client:
+        assert await _fetch_ecosystem_file(client, _CONTENTS_URL, settings) is None
+    httpx_mock.add_response(url=_CONTENTS_URL, method="HEAD", status_code=404)
+    await check_mapping_reachability(settings)
+
+    captured = capsys.readouterr()
+    # Prove the log lines were captured at all, or the next assert is vacuous.
+    assert "unreachable" in captured.out + captured.err
+    assert _TOKEN not in captured.out + captured.err
+    assert _TOKEN not in repr(settings)
+
+
+def test_github_token_defaults_empty_and_reads_the_watcher_env(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("WATCHER_GITHUB_TOKEN", raising=False)
+    assert Settings(_env_file=None).github_token.get_secret_value() == ""  # type: ignore[call-arg]
+    monkeypatch.setenv("WATCHER_GITHUB_TOKEN", _TOKEN)
+    assert Settings(_env_file=None).github_token.get_secret_value() == _TOKEN  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# Startup reachability probe
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reachability_reports_only_the_unreachable(
+    tmp_path: Path, httpx_mock
+) -> None:
+    good = "https://api.github.com/repos/o/r/contents/good.md?ref=main"
+    gone = "https://api.github.com/repos/o/r/contents/gone.md?ref=main"
+    down = "https://raw.example.com/down.md"
+    (tmp_path / "drift-mappings.yaml").write_text(
+        f"docs__en__a.md:\n  - {good}\n  - {gone}\n"
+        f"docs__en__b.md:\n  - {good}\n  - {down}\n"
+    )
+    httpx_mock.add_response(url=good, method="HEAD", status_code=200)
+    httpx_mock.add_response(url=gone, method="HEAD", status_code=404)
+    httpx_mock.add_exception(httpx.ConnectError("refused"), url=down, method="HEAD")
+
+    unreachable = await check_mapping_reachability(_settings(tmp_path))
+
+    assert sorted(unreachable) == sorted([gone, down])
+    # Each distinct URL is probed once even when several pages map to it.
+    assert len(httpx_mock.get_requests()) == 3
+
+
+@pytest.mark.asyncio
+async def test_reachability_with_no_mappings_makes_no_requests(
+    tmp_path: Path, httpx_mock
+) -> None:
+    (tmp_path / "drift-mappings.yaml").write_text("")
+    assert await check_mapping_reachability(_settings(tmp_path)) == []
+    assert httpx_mock.get_requests() == []
+
+
+# ---------------------------------------------------------------------------
+# The shipped mapping file
+# ---------------------------------------------------------------------------
+
+
+def test_shipped_mappings_point_at_the_cadence_monorepo() -> None:
+    """Every target is a contents-API URL into cameronsjo/cadence plugins/.
+
+    Paths were verified to exist on cadence main when written; the startup
+    probe is what catches them moving later.
+    """
+    shipped = Path(__file__).resolve().parents[1] / "drift-mappings.yaml"
+    mappings = _load_mappings(shipped)
+
+    assert mappings
+    prefix = "https://api.github.com/repos/cameronsjo/cadence/contents/plugins/"
+    for urls in mappings.values():
+        for url in urls:
+            assert url.startswith(prefix), url
+            assert url.endswith("?ref=main"), url
+    # Pre-monorepo targets with no counterpart were dropped, not left to 404.
+    assert "docs__en__tools-reference.md" not in mappings

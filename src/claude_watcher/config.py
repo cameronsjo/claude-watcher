@@ -108,6 +108,11 @@ class Settings(BaseSettings):
     # Optional: override the reduce model for drift review (falls back to
     # llm_reduce_model)
     drift_review_model: str = ""
+    # Optional GitHub token for fetching mapped ecosystem files from private
+    # repos (fine-grained, contents:read). Sent as `Authorization: Bearer` to
+    # GitHub hosts only — never to any other host a mapping names. SecretStr so
+    # it never renders in `repr(settings)` or a log line.
+    github_token: SecretStr = SecretStr("")
 
     @property
     def api_docs_enabled(self) -> bool:

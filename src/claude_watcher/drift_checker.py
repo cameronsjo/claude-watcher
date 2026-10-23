@@ -1,6 +1,9 @@
 """Ecosystem drift detection: compare upstream docs against local ecosystem files."""
 
 import asyncio
+import enum
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -24,7 +27,8 @@ Identify specific items where the ecosystem file now CONTRADICTS or OMITS someth
 upstream page states.
 Focus on: API changes, renamed flags/settings/hook types, removed features, new required
 fields, changed behavior.
-Output a concise bullet list. If no drift exists, output exactly: NO DRIFT"""
+Begin your reply with exactly CLEAN on its own line if no drift exists. Otherwise begin
+with DRIFT: followed by a concise bullet list."""
 
 # REDUCE prompt: synthesize map results into a prioritized digest
 _REDUCE_PROMPT = """\
@@ -33,10 +37,15 @@ You will receive per-pair drift reports (upstream doc + ecosystem file).
 Produce a single prioritized digest. Label each item:
   WRONG — ecosystem file states something that is now incorrect
   OUTDATED — ecosystem file is missing new upstream content that matters
-Skip NO DRIFT pairs. If ALL pairs report NO DRIFT, return exactly: NO DRIFT
+If no pair reports real drift, return exactly: CLEAN
 Use Discord markdown. Keep the total response under 2500 characters."""
 
-_NO_DRIFT = "NO DRIFT"
+# Accepted as clean for backward compatibility with the old sentinel prompt.
+_LEGACY_NO_DRIFT = "NO DRIFT"
+# Shown in the digest for a pair whose verdict could not be parsed.
+_UNPARSEABLE_MARK = "(verdict unparseable)"
+# How much of an unparseable reply reaches the log.
+_LOG_REPLY_CHARS = 200
 
 # The token is only ever attached to these hosts. A mapping file is user-edited;
 # a typo'd or hostile entry must not be able to collect the credential.
@@ -46,15 +55,56 @@ _GITHUB_RAW_ACCEPT = "application/vnd.github.raw+json"
 _GITHUB_API_VERSION = "2022-11-28"
 
 
-def _is_no_drift(findings: str) -> bool:
-    """Whether a map result is the no-drift sentinel.
+class VerdictKind(enum.Enum):
+    """The three outcomes of parsing a map reply."""
 
-    Plain equality on the literal was the whole filter, which a model answering
-    "No drift found." defeats — producing a digest of nothing. Normalizing is
-    cheap hardening; it is UNTESTED against a local model, and the drift check
-    ships disabled by default.
+    CLEAN = "clean"
+    DRIFT = "drift"
+    UNPARSEABLE = "unparseable"
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """A parsed map reply. `body` holds the findings for DRIFT, the raw reply
+    for UNPARSEABLE, and is empty for CLEAN."""
+
+    kind: VerdictKind
+    body: str = ""
+
+
+# Markdown a model may wrap the leading token in: bold, italics, inline code,
+# a heading, a quote.
+_WRAPPER_CHARS = "*_`#> \t"
+_OPENING_FENCE = re.compile(r"^```[^\n]*\n?")
+_DRIFT_TOKEN = re.compile(r"^DRIFT[*_`]*\s*:[*_`]*\s*(.*)$", re.IGNORECASE | re.DOTALL)
+
+
+def parse_verdict(reply: str) -> Verdict:
+    """Parse a map reply that should begin with `CLEAN` or `DRIFT:`.
+
+    Tolerates surrounding whitespace, case, a code fence around the reply, and
+    markdown wrappers on the token (`**CLEAN**`, `**DRIFT:**`). A leading
+    `NO DRIFT` is still clean. Anything else is UNPARSEABLE, which callers
+    treat as drift: a wordy "clean" answer must surface, not pass silently.
     """
-    return findings.strip().upper().startswith(_NO_DRIFT)
+    text = reply.strip()
+    if text.startswith("```"):
+        text = _OPENING_FENCE.sub("", text, count=1).rstrip()
+        text = text.removesuffix("```").strip()
+    if not text:
+        return Verdict(VerdictKind.UNPARSEABLE, reply)
+
+    lead = text.lstrip(_WRAPPER_CHARS)
+    drift = _DRIFT_TOKEN.match(lead)
+    if drift:
+        return Verdict(VerdictKind.DRIFT, drift.group(1).strip() or text)
+
+    first_line = lead.partition("\n")[0]
+    if first_line.strip().strip("*_`.!:").strip().upper() == "CLEAN":
+        return Verdict(VerdictKind.CLEAN)
+    if lead.upper().startswith(_LEGACY_NO_DRIFT):
+        return Verdict(VerdictKind.CLEAN)
+    return Verdict(VerdictKind.UNPARSEABLE, reply)
 
 
 def _load_mappings(mappings_file: Path) -> dict[str, list[str]]:
@@ -206,10 +256,10 @@ async def _check_pair(
     ecosystem_content: str,
     map_model: str,
     settings: Settings,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, Verdict]:
     """MAP step: check a single (upstream-page, ecosystem-file) pair for drift.
 
-    Returns (upstream_page, ecosystem_url, drift_findings).
+    Returns (upstream_page, ecosystem_url, verdict).
     """
     user_message = (
         f"UPSTREAM PAGE: {upstream_page}\n\n"
@@ -224,14 +274,21 @@ async def _check_pair(
         model=map_model,
         settings=settings,
     )
-    findings = text.strip()
+    verdict = parse_verdict(text)
+    if verdict.kind is VerdictKind.UNPARSEABLE:
+        logger.warning(
+            "Drift check: map verdict unparseable, treating as drift.",
+            upstream_page=upstream_page,
+            ecosystem_url=ecosystem_url,
+            reply_head=text.strip()[:_LOG_REPLY_CHARS],
+        )
     logger.debug(
         "Drift pair checked.",
         upstream_page=upstream_page,
         ecosystem_url=ecosystem_url,
-        has_drift=not _is_no_drift(findings),
+        verdict=verdict.kind.value,
     )
-    return upstream_page, ecosystem_url, findings
+    return upstream_page, ecosystem_url, verdict
 
 
 async def check_drift(diff: DiffResult, settings: Settings) -> str | None:
@@ -318,12 +375,18 @@ async def check_drift(diff: DiffResult, settings: Settings) -> str | None:
             continue
         map_results.append(result)
 
-    # Filter out NO DRIFT pairs before reduce
-    drift_findings = [
-        (page, url, findings)
-        for page, url, findings in map_results
-        if not _is_no_drift(findings)
-    ]
+    # Drop clean pairs before reduce. An unparseable verdict counts as drift
+    # and carries a visible mark, so a reply that dodged the format surfaces.
+    drift_findings: list[tuple[str, str, str]] = []
+    unparseable_pairs: list[str] = []
+    for page, url, verdict in map_results:
+        if verdict.kind is VerdictKind.CLEAN:
+            continue
+        body = verdict.body
+        if verdict.kind is VerdictKind.UNPARSEABLE:
+            unparseable_pairs.append(f"{page} vs {url}")
+            body = f"{_UNPARSEABLE_MARK}\n{body.strip()}"
+        drift_findings.append((page, url, body))
 
     if not drift_findings:
         logger.info("Drift check: no drift found across all pairs.")
@@ -358,7 +421,15 @@ async def check_drift(diff: DiffResult, settings: Settings) -> str | None:
         )
         return None
 
-    if _is_no_drift(digest):
-        return None
+    if parse_verdict(digest).kind is VerdictKind.CLEAN:
+        digest = ""
+    # Name unparseable pairs outside the model's prose, so the reduce step
+    # cannot drop or reword the mark.
+    if unparseable_pairs:
+        footer = "\n".join(
+            [f"**{_UNPARSEABLE_MARK}** review these pairs by hand:"]
+            + [f"- {pair}" for pair in unparseable_pairs]
+        )
+        digest = f"{digest}\n\n{footer}" if digest else footer
 
-    return digest
+    return digest or None

@@ -12,11 +12,12 @@ from structlog.testing import capture_logs
 from claude_watcher.config import Settings
 from claude_watcher.differ import DiffResult
 from claude_watcher.drift_checker import (
+    VerdictKind,
     _fetch_ecosystem_file,
-    _is_no_drift,
     _load_mappings,
     check_drift,
     check_mapping_reachability,
+    parse_verdict,
 )
 
 # ---------------------------------------------------------------------------
@@ -77,16 +78,36 @@ def _client(create) -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# NO DRIFT sentinel normalization
+# Verdict parsing
 # ---------------------------------------------------------------------------
 
 
-def test_no_drift_sentinel_is_normalized() -> None:
-    """A model that answers 'No drift found.' must not produce a digest."""
-    assert _is_no_drift("NO DRIFT")
-    assert _is_no_drift("  no drift found.\n")
-    assert _is_no_drift("No Drift")
-    assert not _is_no_drift("- Hook names changed")
+@pytest.mark.parametrize(
+    ("reply", "kind", "body"),
+    [
+        ("CLEAN", VerdictKind.CLEAN, ""),
+        ("clean.", VerdictKind.CLEAN, ""),
+        ("**CLEAN**", VerdictKind.CLEAN, ""),
+        ("  CLEAN\nNothing contradicts upstream.\n", VerdictKind.CLEAN, ""),
+        ("NO DRIFT", VerdictKind.CLEAN, ""),
+        ("  no drift found.\n", VerdictKind.CLEAN, ""),
+        ("DRIFT: x", VerdictKind.DRIFT, "x"),
+        ("drift:\n- a\n- b", VerdictKind.DRIFT, "- a\n- b"),
+        ("**DRIFT:** x", VerdictKind.DRIFT, "x"),
+        ("```\nCLEAN\n```", VerdictKind.CLEAN, ""),
+        ("```markdown\nDRIFT: x\n```", VerdictKind.DRIFT, "x"),
+        ("There is no drift.", VerdictKind.UNPARSEABLE, "There is no drift."),
+        ("- Hook names changed", VerdictKind.UNPARSEABLE, "- Hook names changed"),
+        ("Clean code matters", VerdictKind.UNPARSEABLE, "Clean code matters"),
+        ("", VerdictKind.UNPARSEABLE, ""),
+        ("```\n```", VerdictKind.UNPARSEABLE, "```\n```"),
+    ],
+)
+def test_parse_verdict(reply: str, kind: VerdictKind, body: str) -> None:
+    """The map reply parses to clean, drift with a body, or unparseable."""
+    verdict = parse_verdict(reply)
+    assert verdict.kind is kind
+    assert verdict.body == body
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +281,7 @@ async def test_drift_found_returns_digest(tmp_path: Path, httpx_mock) -> None:
 
     create = AsyncMock(
         side_effect=[
-            _response("- Hook event names changed from X to Y"),
+            _response("DRIFT:\n- Hook event names changed from X to Y"),
             _response("WRONG: Hook event names changed from X to Y"),
         ]
     )
@@ -830,3 +851,87 @@ def test_shipped_mappings_point_at_the_cadence_monorepo() -> None:
             assert url.endswith("?ref=main"), url
     # Pre-monorepo targets with no counterpart were dropped, not left to 404.
     assert "docs__en__tools-reference.md" not in mappings
+
+
+# ---------------------------------------------------------------------------
+# Verdict outcomes at the drift-check level
+# ---------------------------------------------------------------------------
+
+
+def _single_pair(tmp_path: Path, httpx_mock) -> tuple[Settings, DiffResult]:
+    mappings_path = tmp_path / "drift-mappings.yaml"
+    _write_mappings(
+        mappings_path,
+        "docs__en__hooks.md:\n  - https://raw.example.com/hooks-skill.md\n",
+    )
+    _write_snapshot(tmp_path, "docs__en__hooks.md", "# Hooks\nContent.")
+    httpx_mock.add_response(
+        url="https://raw.example.com/hooks-skill.md", text="# Skill\nContent."
+    )
+    settings = _settings(tmp_path, drift_mappings_file=mappings_path)
+    return settings, DiffResult(modified_pages=["docs__en__hooks.md"])
+
+
+@pytest.mark.asyncio
+async def test_clean_verdict_returns_none(tmp_path: Path, httpx_mock) -> None:
+    """A CLEAN map verdict skips the reduce call and yields no digest."""
+    settings, diff = _single_pair(tmp_path, httpx_mock)
+    create = AsyncMock(return_value=_response("**CLEAN**"))
+
+    with patch(_PATCH_TARGET, return_value=_client(create)):
+        result = await check_drift(diff, settings)
+
+    assert result is None
+    assert create.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_drift_verdict_sends_body_to_reduce(tmp_path: Path, httpx_mock) -> None:
+    """A DRIFT verdict passes its findings, without the token, to reduce."""
+    settings, diff = _single_pair(tmp_path, httpx_mock)
+    create = AsyncMock(
+        side_effect=[
+            _response("DRIFT: hook renamed"),
+            _response("WRONG: hook renamed"),
+        ]
+    )
+
+    with patch(_PATCH_TARGET, return_value=_client(create)):
+        result = await check_drift(diff, settings)
+
+    assert result == "WRONG: hook renamed"
+    reduce_input = create.call_args_list[1].kwargs["messages"][1]["content"]
+    assert "hook renamed" in reduce_input
+    assert "DRIFT:" not in reduce_input
+    assert "unparseable" not in reduce_input
+
+
+@pytest.mark.asyncio
+async def test_unparseable_verdict_surfaces_as_drift(
+    tmp_path: Path, httpx_mock
+) -> None:
+    """A wordy reply is treated as drift, logged, and marked in the digest.
+
+    The reduce model says CLEAN here, so the mark alone carries the pair: an
+    unparseable verdict must never vanish silently.
+    """
+    settings, diff = _single_pair(tmp_path, httpx_mock)
+    reply = "There is no drift. " + "x" * 400
+    create = AsyncMock(side_effect=[_response(reply), _response("CLEAN")])
+
+    with patch(_PATCH_TARGET, return_value=_client(create)):
+        with capture_logs() as logs:
+            result = await check_drift(diff, settings)
+
+    assert result is not None
+    assert "(verdict unparseable)" in result
+    assert "docs__en__hooks.md vs https://raw.example.com/hooks-skill.md" in result
+    reduce_input = create.call_args_list[1].kwargs["messages"][1]["content"]
+    assert "(verdict unparseable)" in reduce_input
+
+    warnings = [e for e in logs if "unparseable" in e["event"]]
+    assert len(warnings) == 1
+    assert warnings[0]["log_level"] == "warning"
+    assert warnings[0]["upstream_page"] == "docs__en__hooks.md"
+    assert warnings[0]["ecosystem_url"] == "https://raw.example.com/hooks-skill.md"
+    assert warnings[0]["reply_head"] == reply[:200]

@@ -3,12 +3,21 @@
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import openai
 import pytest
+from pydantic import SecretStr, ValidationError
+from structlog.testing import capture_logs
 
 from claude_watcher.config import Settings
 from claude_watcher.differ import DiffResult
-from claude_watcher.drift_checker import _is_no_drift, _load_mappings, check_drift
+from claude_watcher.drift_checker import (
+    _fetch_ecosystem_file,
+    _is_no_drift,
+    _load_mappings,
+    check_drift,
+    check_mapping_reachability,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -517,3 +526,307 @@ async def test_budgets_reach_the_llm_call(tmp_path: Path, httpx_mock) -> None:
 
     assert result is not None
     assert seen == [777, 8888]
+
+
+# ---------------------------------------------------------------------------
+# GitHub auth on ecosystem fetches (issue #15)
+# ---------------------------------------------------------------------------
+
+_TOKEN = "github_pat_test_SECRET_value"
+_CONTENTS_URL = (
+    "https://api.github.com/repos/cameronsjo/cadence/contents/"
+    "plugins/cadence/skills/writing-hooks/SKILL.md?ref=main"
+)
+
+
+@pytest.mark.asyncio
+async def test_token_is_sent_as_bearer_with_the_raw_media_type(
+    tmp_path: Path, httpx_mock
+) -> None:
+    httpx_mock.add_response(
+        url=_CONTENTS_URL,
+        match_headers={
+            "Authorization": f"Bearer {_TOKEN}",
+            "Accept": "application/vnd.github.raw+json",
+        },
+        text="# Writing Hooks",
+    )
+    settings = _settings(tmp_path, github_token=_TOKEN)
+
+    async with httpx.AsyncClient() as client:
+        text = await _fetch_ecosystem_file(client, _CONTENTS_URL, settings)
+
+    assert text == "# Writing Hooks"
+
+
+@pytest.mark.asyncio
+async def test_raw_githubusercontent_also_gets_the_token(
+    tmp_path: Path, httpx_mock
+) -> None:
+    url = "https://raw.githubusercontent.com/cameronsjo/cadence/main/README.md"
+    httpx_mock.add_response(
+        url=url, match_headers={"Authorization": f"Bearer {_TOKEN}"}, text="ok"
+    )
+    settings = _settings(tmp_path, github_token=_TOKEN)
+
+    async with httpx.AsyncClient() as client:
+        assert await _fetch_ecosystem_file(client, url, settings) == "ok"
+
+
+@pytest.mark.asyncio
+async def test_token_is_never_sent_to_a_non_github_host(
+    tmp_path: Path, httpx_mock
+) -> None:
+    """A mapping entry pointing elsewhere must not collect the credential."""
+    url = "https://raw.example.com/hooks-skill.md"
+    httpx_mock.add_response(url=url, text="body")
+    settings = _settings(tmp_path, github_token=_TOKEN)
+
+    async with httpx.AsyncClient() as client:
+        await _fetch_ecosystem_file(client, url, settings)
+
+    (request,) = httpx_mock.get_requests()
+    assert "Authorization" not in request.headers
+
+
+@pytest.mark.asyncio
+async def test_no_token_sends_no_authorization(tmp_path: Path, httpx_mock) -> None:
+    httpx_mock.add_response(url=_CONTENTS_URL, text="public")
+    settings = _settings(tmp_path)
+
+    async with httpx.AsyncClient() as client:
+        await _fetch_ecosystem_file(client, _CONTENTS_URL, settings)
+
+    (request,) = httpx_mock.get_requests()
+    assert "Authorization" not in request.headers
+    assert request.headers["Accept"] == "application/vnd.github.raw+json"
+
+
+@pytest.mark.asyncio
+async def test_token_never_reaches_logs_or_repr(
+    tmp_path: Path, httpx_mock, capsys: pytest.CaptureFixture[str]
+) -> None:
+    httpx_mock.add_response(url=_CONTENTS_URL, status_code=404)
+    settings = _settings(tmp_path, github_token=_TOKEN)
+    (tmp_path / "drift-mappings.yaml").write_text(
+        f"docs__en__hooks.md:\n  - {_CONTENTS_URL}\n"
+    )
+
+    async with httpx.AsyncClient() as client:
+        assert await _fetch_ecosystem_file(client, _CONTENTS_URL, settings) is None
+    httpx_mock.add_response(url=_CONTENTS_URL, method="HEAD", status_code=404)
+    await check_mapping_reachability(settings)
+
+    captured = capsys.readouterr()
+    # Prove the log lines were captured at all, or the next assert is vacuous.
+    assert "unreachable" in captured.out + captured.err
+    assert _TOKEN not in captured.out + captured.err
+    assert _TOKEN not in repr(settings)
+
+
+def test_github_token_defaults_empty_and_reads_the_watcher_env(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("WATCHER_GITHUB_TOKEN", raising=False)
+    assert Settings(_env_file=None).github_token.get_secret_value() == ""  # type: ignore[call-arg]
+    monkeypatch.setenv("WATCHER_GITHUB_TOKEN", _TOKEN)
+    assert Settings(_env_file=None).github_token.get_secret_value() == _TOKEN  # type: ignore[call-arg]
+
+
+def test_token_whitespace_is_stripped_at_load() -> None:
+    """A secret mounted from a file ends in a newline; it must not survive."""
+    for raw in (f"{_TOKEN}\n", f"{_TOKEN} ", f"  {_TOKEN}\r\n"):
+        settings = Settings(github_token=raw, _env_file=None)  # type: ignore[call-arg]
+        assert settings.github_token.get_secret_value() == _TOKEN
+
+
+@pytest.mark.parametrize(
+    "bad", [f"{_TOKEN}\u2019", f"ghp_mid\nline{_TOKEN}", f"{_TOKEN}\x00x"]
+)
+def test_bad_token_fails_settings_load_without_echoing_it(bad: str) -> None:
+    """Non-ASCII or an inner control char is a clear startup error, value hidden."""
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(github_token=bad, _env_file=None)  # type: ignore[call-arg]
+    message = str(excinfo.value)
+    assert "WATCHER_GITHUB_TOKEN" in message
+    assert _TOKEN not in message
+    assert "ghp_mid" not in message
+
+
+@pytest.mark.asyncio
+async def test_trailing_newline_token_never_reaches_any_log_record(
+    tmp_path: Path,
+    httpx_mock,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Regression for the h11 "Illegal header value b'Bearer <token>'" leak.
+
+    Two layers: the env value is cleaned at load, and — should a dirty token
+    ever reach a request anyway — the failure is logged without its message.
+    The transport is mocked, so the h11 error is raised as h11 would raise it.
+    """
+    settings = _settings(tmp_path, github_token=f"{_TOKEN}\n")
+    assert settings.github_token.get_secret_value() == _TOKEN
+
+    # Force the dirty value past validation to exercise the logging sink.
+    settings.github_token = SecretStr(f"{_TOKEN}\n")
+    leaky = httpx.LocalProtocolError(f"Illegal header value b'Bearer {_TOKEN}\\n'")
+    httpx_mock.add_exception(leaky, url=_CONTENTS_URL)
+    httpx_mock.add_exception(leaky, url=_CONTENTS_URL, method="HEAD")
+    (tmp_path / "drift-mappings.yaml").write_text(
+        f"docs__en__hooks.md:\n  - {_CONTENTS_URL}\n"
+    )
+
+    with capture_logs() as records:
+        async with httpx.AsyncClient() as client:
+            assert await _fetch_ecosystem_file(client, _CONTENTS_URL, settings) is None
+        assert await check_mapping_reachability(settings) == [_CONTENTS_URL]
+
+    # Prove records were captured, or the absence check below is vacuous.
+    assert any(r.get("error_type") == "LocalProtocolError" for r in records)
+    assert _TOKEN not in repr(records)
+    assert _TOKEN not in caplog.text
+    captured = capsys.readouterr()
+    assert _TOKEN not in captured.out + captured.err
+
+
+@pytest.mark.asyncio
+async def test_non_ascii_token_does_not_crash_the_startup_probe(
+    tmp_path: Path, httpx_mock
+) -> None:
+    """Load-time validation rejects this; the probe must survive it regardless.
+
+    httpx raises UnicodeEncodeError building the header — not an HTTPError —
+    which used to escape the probe and stop the scheduler from starting.
+    """
+    good = "https://raw.example.com/good.md"
+    (tmp_path / "drift-mappings.yaml").write_text(
+        f"docs__en__a.md:\n  - {_CONTENTS_URL}\n  - {good}\n"
+    )
+    httpx_mock.add_response(url=good, method="HEAD", status_code=200)
+    settings = _settings(tmp_path)
+    settings.github_token = SecretStr(f"{_TOKEN}\u2019")
+
+    with capture_logs() as records:
+        unreachable = await check_mapping_reachability(settings)
+
+    assert unreachable == [_CONTENTS_URL]
+    assert any(r.get("error_type") == "UnicodeEncodeError" for r in records)
+    assert _TOKEN not in repr(records)
+
+
+@pytest.mark.asyncio
+async def test_token_is_never_sent_over_plain_http(tmp_path: Path, httpx_mock) -> None:
+    url = "http://api.github.com/repos/o/r/contents/x.md?ref=main"
+    httpx_mock.add_response(url=url, text="body")
+    settings = _settings(tmp_path, github_token=_TOKEN)
+
+    async with httpx.AsyncClient() as client:
+        await _fetch_ecosystem_file(client, url, settings)
+
+    (request,) = httpx_mock.get_requests()
+    assert "Authorization" not in request.headers
+
+
+@pytest.mark.asyncio
+async def test_token_is_never_sent_to_a_non_default_port(
+    tmp_path: Path, httpx_mock
+) -> None:
+    url = "https://api.github.com:8443/repos/o/r/contents/x.md?ref=main"
+    httpx_mock.add_response(url=url, text="body")
+    settings = _settings(tmp_path, github_token=_TOKEN)
+
+    async with httpx.AsyncClient() as client:
+        await _fetch_ecosystem_file(client, url, settings)
+
+    (request,) = httpx_mock.get_requests()
+    assert "Authorization" not in request.headers
+
+
+@pytest.mark.asyncio
+async def test_redirect_does_not_carry_the_token_to_another_host(
+    tmp_path: Path, httpx_mock
+) -> None:
+    """A 3xx to another host is not followed, and would not carry the token."""
+    evil = "https://evil.example/collect"
+    httpx_mock.add_response(
+        url=_CONTENTS_URL, status_code=301, headers={"Location": evil}
+    )
+    settings = _settings(tmp_path, github_token=_TOKEN)
+
+    # The client this module uses does not follow redirects at all.
+    async with httpx.AsyncClient() as client:
+        assert await _fetch_ecosystem_file(client, _CONTENTS_URL, settings) is None
+    assert [str(r.url) for r in httpx_mock.get_requests()] == [_CONTENTS_URL]
+
+    # And if following is ever turned on, httpx drops Authorization cross-origin.
+    httpx_mock.add_response(
+        url=_CONTENTS_URL, status_code=301, headers={"Location": evil}
+    )
+    httpx_mock.add_response(url=evil, text="gotcha")
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        await _fetch_ecosystem_file(client, _CONTENTS_URL, settings)
+    hop = httpx_mock.get_requests()[-1]
+    assert str(hop.url) == evil
+    assert "Authorization" not in hop.headers
+
+
+# ---------------------------------------------------------------------------
+# Startup reachability probe
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reachability_reports_only_the_unreachable(
+    tmp_path: Path, httpx_mock
+) -> None:
+    good = "https://api.github.com/repos/o/r/contents/good.md?ref=main"
+    gone = "https://api.github.com/repos/o/r/contents/gone.md?ref=main"
+    down = "https://raw.example.com/down.md"
+    (tmp_path / "drift-mappings.yaml").write_text(
+        f"docs__en__a.md:\n  - {good}\n  - {gone}\n"
+        f"docs__en__b.md:\n  - {good}\n  - {down}\n"
+    )
+    httpx_mock.add_response(url=good, method="HEAD", status_code=200)
+    httpx_mock.add_response(url=gone, method="HEAD", status_code=404)
+    httpx_mock.add_exception(httpx.ConnectError("refused"), url=down, method="HEAD")
+
+    unreachable = await check_mapping_reachability(_settings(tmp_path))
+
+    assert sorted(unreachable) == sorted([gone, down])
+    # Each distinct URL is probed once even when several pages map to it.
+    assert len(httpx_mock.get_requests()) == 3
+
+
+@pytest.mark.asyncio
+async def test_reachability_with_no_mappings_makes_no_requests(
+    tmp_path: Path, httpx_mock
+) -> None:
+    (tmp_path / "drift-mappings.yaml").write_text("")
+    assert await check_mapping_reachability(_settings(tmp_path)) == []
+    assert httpx_mock.get_requests() == []
+
+
+# ---------------------------------------------------------------------------
+# The shipped mapping file
+# ---------------------------------------------------------------------------
+
+
+def test_shipped_mappings_point_at_the_cadence_monorepo() -> None:
+    """Every target is a contents-API URL into cameronsjo/cadence plugins/.
+
+    Paths were verified to exist on cadence main when written; the startup
+    probe is what catches them moving later.
+    """
+    shipped = Path(__file__).resolve().parents[1] / "drift-mappings.yaml"
+    mappings = _load_mappings(shipped)
+
+    assert mappings
+    prefix = "https://api.github.com/repos/cameronsjo/cadence/contents/plugins/"
+    for urls in mappings.values():
+        for url in urls:
+            assert url.startswith(prefix), url
+            assert url.endswith("?ref=main"), url
+    # Pre-monorepo targets with no counterpart were dropped, not left to 404.
+    assert "docs__en__tools-reference.md" not in mappings

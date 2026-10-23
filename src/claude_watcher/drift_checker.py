@@ -38,6 +38,13 @@ Use Discord markdown. Keep the total response under 2500 characters."""
 
 _NO_DRIFT = "NO DRIFT"
 
+# The token is only ever attached to these hosts. A mapping file is user-edited;
+# a typo'd or hostile entry must not be able to collect the credential.
+_GITHUB_HOSTS = frozenset({"api.github.com", "raw.githubusercontent.com"})
+# The contents API returns a JSON envelope by default; this asks for the file.
+_GITHUB_RAW_ACCEPT = "application/vnd.github.raw+json"
+_GITHUB_API_VERSION = "2022-11-28"
+
 
 def _is_no_drift(findings: str) -> bool:
     """Whether a map result is the no-drift sentinel.
@@ -80,15 +87,116 @@ def _load_mappings(mappings_file: Path) -> dict[str, list[str]]:
     }
 
 
-async def _fetch_ecosystem_file(client: httpx.AsyncClient, url: str) -> str | None:
+def _request_headers(url: str, settings: Settings) -> dict[str, str]:
+    """Headers for fetching one mapped URL: raw media type and, for GitHub, auth."""
+    try:
+        parsed = httpx.URL(url)
+    except httpx.InvalidURL:
+        return {}
+    host = parsed.host
+    headers: dict[str, str] = {}
+    if host == "api.github.com":
+        headers["Accept"] = _GITHUB_RAW_ACCEPT
+        headers["X-GitHub-Api-Version"] = _GITHUB_API_VERSION
+    token = settings.github_token.get_secret_value()
+    # Origin, not just host: an `http://` entry would send the token in
+    # cleartext, and a non-default port is not GitHub's service. httpx
+    # normalizes an explicit :443 on https to `port is None`.
+    if (
+        token
+        and parsed.scheme == "https"
+        and host in _GITHUB_HOSTS
+        and parsed.port is None
+    ):
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+async def _fetch_ecosystem_file(
+    client: httpx.AsyncClient, url: str, settings: Settings
+) -> str | None:
     """Fetch a single raw ecosystem file. Returns content or None on error."""
     try:
-        response = await client.get(url, timeout=20.0)
+        response = await client.get(
+            url, headers=_request_headers(url, settings), timeout=20.0
+        )
         response.raise_for_status()
         return response.text
-    except httpx.HTTPError as exc:
-        logger.warning("Failed to fetch ecosystem file.", url=url, error=str(exc))
+    except httpx.HTTPStatusError as exc:
+        logger.warning(
+            "Failed to fetch ecosystem file.",
+            url=url,
+            status_code=exc.response.status_code,
+        )
         return None
+    except Exception as exc:
+        # Never log str(exc): this request may carry the bearer token, and some
+        # errors quote the offending header — h11's "Illegal header value
+        # b'Bearer <token>'" does. The type name and the URL are enough.
+        logger.warning(
+            "Failed to fetch ecosystem file.",
+            url=url,
+            error_type=type(exc).__name__,
+        )
+        return None
+
+
+async def _probe_url(
+    client: httpx.AsyncClient, url: str, settings: Settings
+) -> int | str:
+    """HEAD one mapped URL. Returns the status code, or the error type name."""
+    try:
+        response = await client.head(
+            url, headers=_request_headers(url, settings), timeout=10.0
+        )
+    except Exception as exc:
+        # The type name only — never the message, which can quote the token.
+        return type(exc).__name__
+    return response.status_code
+
+
+async def check_mapping_reachability(settings: Settings) -> list[str]:
+    """HEAD every mapped ecosystem URL once and log the ones that fail.
+
+    Run at startup so a mapping that rots (a moved file, a repo gone private,
+    an expired token) is loud on the day it breaks instead of silently
+    producing "no fetchable pairs" forever. Returns the unreachable URLs.
+    Never raises on a per-URL failure of any kind: each probe catches its own
+    error, so one bad request cannot stop the scheduler from starting.
+    """
+    mappings = _load_mappings(settings.drift_mappings_file)
+    urls = sorted({url for targets in mappings.values() for url in targets})
+    if not urls:
+        return []
+
+    async with httpx.AsyncClient() as client:
+        results = await asyncio.gather(
+            *(_probe_url(client, url, settings) for url in urls)
+        )
+
+    authenticated = bool(settings.github_token.get_secret_value())
+    unreachable: list[str] = []
+    for url, result in zip(urls, results, strict=True):
+        if isinstance(result, int) and 200 <= result < 300:
+            continue
+        unreachable.append(url)
+        logger.warning(
+            "Drift check: mapped ecosystem file is unreachable.",
+            url=url,
+            status_code=result if isinstance(result, int) else None,
+            error_type=result if isinstance(result, str) else None,
+            # A private repo answers 404, not 401/403, without a token.
+            hint=None
+            if authenticated
+            else "WATCHER_GITHUB_TOKEN is unset; private repos read as 404",
+        )
+    logger.info(
+        "Drift check: mapping reachability probed.",
+        total=len(urls),
+        unreachable=len(unreachable),
+        authenticated=authenticated,
+    )
+    return unreachable
 
 
 async def _check_pair(
@@ -161,7 +269,8 @@ async def check_drift(diff: DiffResult, settings: Settings) -> str | None:
 
     async with httpx.AsyncClient() as http_client:
         fetch_tasks = [
-            _fetch_ecosystem_file(http_client, url) for _, url in ecosystem_urls
+            _fetch_ecosystem_file(http_client, url, settings)
+            for _, url in ecosystem_urls
         ]
         fetched_contents = await asyncio.gather(*fetch_tasks)
 

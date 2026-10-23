@@ -151,14 +151,28 @@ Set `WATCHER_DRIFT_CHECK_ENABLED=true` in your `.env`. Requires `WATCHER_LLM_API
 The `NO DRIFT` sentinel is a string match on the model's reply. It is untested
 against a local model, which is one reason the check ships disabled.
 
-The mapping file (`drift-mappings.yaml` at repo root by default) links upstream doc filenames to raw GitHub URLs of your ecosystem files. The filename convention matches the snapshot filenames produced by the fetcher: `docs__en__<page>.md`.
+The mapping file (`drift-mappings.yaml` at repo root by default) links upstream doc filenames to URLs of your ecosystem files. The filename convention matches the snapshot filenames produced by the fetcher: `docs__en__<page>.md`.
 
 ```yaml
 docs__en__hooks.md:
-  - https://raw.githubusercontent.com/yourorg/yourrepo/main/skills/writing-hooks.md
+  - https://api.github.com/repos/yourorg/yourrepo/contents/skills/writing-hooks/SKILL.md?ref=main
 ```
 
-The mapping file is itself drift-prone — review entries whenever upstream docs are restructured.
+GitHub contents-API URLs are fetched with the raw media type, so they return the
+file itself. For a **private** repo set `WATCHER_GITHUB_TOKEN` (fine-grained,
+`contents:read`); it is sent as `Authorization: Bearer` to `api.github.com` and
+`raw.githubusercontent.com` over `https` only, never to another host or over
+plain `http`. Surrounding whitespace (a trailing newline from a mounted secret)
+is stripped at startup, and a token with any other control or non-ASCII
+character fails startup with an error that does not show it. Fetch and probe
+failures log the URL and the error type, never the error text, so the token is
+not logged.
+Without it a private repo answers 404.
+
+The mapping file is itself drift-prone — review entries whenever upstream docs are
+restructured or ecosystem files move. At scheduler startup (when the drift check
+is active) every mapped URL is probed with a `HEAD` request and each unreachable
+one is logged as a warning.
 
 ### Configuration
 
@@ -167,6 +181,7 @@ The mapping file is itself drift-prone — review entries whenever upstream docs
 | `WATCHER_DRIFT_CHECK_ENABLED` | `false` | Enable drift checking |
 | `WATCHER_DRIFT_MAPPINGS_FILE` | `drift-mappings.yaml` | Path to the mapping file |
 | `WATCHER_DRIFT_REVIEW_MODEL` | `WATCHER_LLM_REDUCE_MODEL` | Model for drift synthesis (optional) |
+| `WATCHER_GITHUB_TOKEN` | _(empty)_ | GitHub token for private mapped repos (optional) |
 
 ## License
 

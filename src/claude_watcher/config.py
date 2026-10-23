@@ -9,7 +9,9 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """All configuration loaded from environment variables prefixed with WATCHER_."""
 
-    model_config = {"env_prefix": "WATCHER_"}
+    # hide_input_in_errors: a ValidationError otherwise echoes the raw input
+    # value, and several fields here are credentials (see github_token).
+    model_config = {"env_prefix": "WATCHER_", "hide_input_in_errors": True}
 
     # CHANGELOG polling schedule
     changelog_peak_interval_hours: int = 1
@@ -113,6 +115,26 @@ class Settings(BaseSettings):
     # GitHub hosts only — never to any other host a mapping names. SecretStr so
     # it never renders in `repr(settings)` or a log line.
     github_token: SecretStr = SecretStr("")
+
+    @field_validator("github_token", mode="after")
+    @classmethod
+    def clean_github_token(cls, v: SecretStr) -> SecretStr:
+        """Strip surrounding whitespace; reject anything but visible ASCII.
+
+        A secret mounted from a file usually ends in a newline. Sent as is, h11
+        rejects the header with "Illegal header value b'Bearer <token>'" — an
+        error message that carries the token itself. A non-ASCII character (a
+        pasted smart quote) fails earlier, as a UnicodeEncodeError. Both are
+        settled here, once, so no request is ever built with such a value. The
+        error names the problem, never the value.
+        """
+        token = v.get_secret_value().strip()
+        if any(not ("!" <= ch <= "~") for ch in token):
+            raise ValueError(
+                "WATCHER_GITHUB_TOKEN contains a control, whitespace or "
+                "non-ASCII character; re-copy the token (value not shown)"
+            )
+        return SecretStr(token)
 
     @property
     def api_docs_enabled(self) -> bool:

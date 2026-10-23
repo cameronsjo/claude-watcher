@@ -120,7 +120,12 @@ docs__en__hooks.md:
 GitHub contents-API URLs are fetched with the raw media type, so they return the
 file itself. For a **private** repo set `WATCHER_GITHUB_TOKEN` (fine-grained,
 `contents:read`); it is sent as `Authorization: Bearer` to `api.github.com` and
-`raw.githubusercontent.com` only, never to another host, and never logged.
+`raw.githubusercontent.com` over `https` only, never to another host or over
+plain `http`. Surrounding whitespace (a trailing newline from a mounted secret)
+is stripped at startup, and a token with any other control or non-ASCII
+character fails startup with an error that does not show it. Fetch and probe
+failures log the URL and the error type, never the error text, so the token is
+not logged.
 Without it a private repo answers 404.
 
 The mapping file is itself drift-prone — review entries whenever upstream docs are

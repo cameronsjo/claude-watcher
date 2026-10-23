@@ -90,15 +90,24 @@ def _load_mappings(mappings_file: Path) -> dict[str, list[str]]:
 def _request_headers(url: str, settings: Settings) -> dict[str, str]:
     """Headers for fetching one mapped URL: raw media type and, for GitHub, auth."""
     try:
-        host = httpx.URL(url).host
+        parsed = httpx.URL(url)
     except httpx.InvalidURL:
         return {}
+    host = parsed.host
     headers: dict[str, str] = {}
     if host == "api.github.com":
         headers["Accept"] = _GITHUB_RAW_ACCEPT
         headers["X-GitHub-Api-Version"] = _GITHUB_API_VERSION
     token = settings.github_token.get_secret_value()
-    if token and host in _GITHUB_HOSTS:
+    # Origin, not just host: an `http://` entry would send the token in
+    # cleartext, and a non-default port is not GitHub's service. httpx
+    # normalizes an explicit :443 on https to `port is None`.
+    if (
+        token
+        and parsed.scheme == "https"
+        and host in _GITHUB_HOSTS
+        and parsed.port is None
+    ):
         headers["Authorization"] = f"Bearer {token}"
     return headers
 
@@ -113,10 +122,22 @@ async def _fetch_ecosystem_file(
         )
         response.raise_for_status()
         return response.text
-    except (httpx.HTTPError, httpx.InvalidURL) as exc:
-        # httpx messages carry the URL, never request headers, so the token
-        # cannot reach this line.
-        logger.warning("Failed to fetch ecosystem file.", url=url, error=str(exc))
+    except httpx.HTTPStatusError as exc:
+        logger.warning(
+            "Failed to fetch ecosystem file.",
+            url=url,
+            status_code=exc.response.status_code,
+        )
+        return None
+    except Exception as exc:
+        # Never log str(exc): this request may carry the bearer token, and some
+        # errors quote the offending header — h11's "Illegal header value
+        # b'Bearer <token>'" does. The type name and the URL are enough.
+        logger.warning(
+            "Failed to fetch ecosystem file.",
+            url=url,
+            error_type=type(exc).__name__,
+        )
         return None
 
 
@@ -128,7 +149,8 @@ async def _probe_url(
         response = await client.head(
             url, headers=_request_headers(url, settings), timeout=10.0
         )
-    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+    except Exception as exc:
+        # The type name only — never the message, which can quote the token.
         return type(exc).__name__
     return response.status_code
 
@@ -139,7 +161,8 @@ async def check_mapping_reachability(settings: Settings) -> list[str]:
     Run at startup so a mapping that rots (a moved file, a repo gone private,
     an expired token) is loud on the day it breaks instead of silently
     producing "no fetchable pairs" forever. Returns the unreachable URLs.
-    Never raises on network errors.
+    Never raises on a per-URL failure of any kind: each probe catches its own
+    error, so one bad request cannot stop the scheduler from starting.
     """
     mappings = _load_mappings(settings.drift_mappings_file)
     urls = sorted({url for targets in mappings.values() for url in targets})

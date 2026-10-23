@@ -4,8 +4,10 @@ LABEL org.opencontainers.image.source="https://github.com/cameronsjo/claude-watc
       org.opencontainers.image.description="Self-hosted documentation watcher for Claude Code" \
       org.opencontainers.image.licenses="MIT"
 
+# tini runs as PID 1 and reaps any orphaned child (issue #6). Without an init,
+# PID 1 is the app itself, which never wait()s on processes reparented to it.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends git tini \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home watcher
@@ -30,4 +32,5 @@ RUN git config --global user.name "claude-watcher" \
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD python -c "print('ok')" || exit 1
 
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["uv", "run", "python", "-m", "claude_watcher.main"]

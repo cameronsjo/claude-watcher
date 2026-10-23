@@ -49,7 +49,8 @@ actually change, and steady-state runs only diff genuine changes.
 - [uv](https://docs.astral.sh/uv/) for dependency management
 - Discord webhook URL
 - SMTP credentials for email delivery
-- Anthropic API key
+- An OpenAI-compatible LLM endpoint and its API key (optional — without a key the
+  digest is the plain changed-page list)
 
 ### Install
 
@@ -81,6 +82,26 @@ make start
 make docker-build
 make docker-run
 ```
+
+### LLM endpoint
+
+The summarizer speaks the OpenAI chat-completions dialect to whatever
+`WATCHER_LLM_BASE_URL` points at, so it can be routed through any compatible
+gateway or proxy (cost attribution, central rate limits, one credential to
+rotate, provider failover) without a code change. Unset, it uses the default
+below.
+
+| Variable | Default | Description |
+|---|---|---|
+| `WATCHER_LLM_BASE_URL` | `http://agentgateway:8082/v1` | Base URL of the OpenAI-compatible endpoint |
+| `WATCHER_LLM_API_KEY` | _(empty)_ | Key for that endpoint; empty disables summarization |
+| `WATCHER_LLM_MAP_MODEL` / `WATCHER_LLM_REDUCE_MODEL` | `local/Qwen3.8-27B-Heretic-RVN-Q4_K_M` | Model ids, as the endpoint names them |
+
+`ANTHROPIC_BASE_URL` is deliberately **not** read. It names an Anthropic
+Messages-API endpoint, which this client does not speak, and it is often
+exported globally for other tools — honoring it would silently reroute the
+watcher. To use Anthropic's own OpenAI-compatible endpoint, set
+`WATCHER_LLM_BASE_URL=https://api.anthropic.com/v1/`.
 
 ## Schedule
 

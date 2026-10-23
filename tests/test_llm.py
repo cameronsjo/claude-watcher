@@ -102,6 +102,31 @@ async def test_client_is_built_with_the_unwrapped_secret() -> None:
     assert (text, tokens_in, tokens_out) == ("hi", 3, 4)
 
 
+@pytest.mark.asyncio
+async def test_base_url_override_reaches_the_client(monkeypatch) -> None:
+    """An env-set base URL is what the SDK client is constructed with."""
+    monkeypatch.setenv("WATCHER_LLM_BASE_URL", "https://proxy.example/v1")
+    settings = Settings(
+        llm_api_key="gw-test-key",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+
+    response = MagicMock()
+    response.choices = [MagicMock(message=MagicMock(content="hi"))]
+    response.usage = MagicMock(prompt_tokens=1, completion_tokens=1)
+
+    async def create(**kwargs):
+        return response
+
+    client = MagicMock()
+    client.chat.completions.create = create
+
+    with patch("claude_watcher.llm.openai.AsyncOpenAI", return_value=client) as cls:
+        await complete("sys", "user", 16, model="local/x", settings=settings)
+
+    assert cls.call_args.kwargs["base_url"] == "https://proxy.example/v1"
+
+
 def test_secret_key_does_not_render_in_settings_repr() -> None:
     settings = Settings(
         llm_api_key="gw-super-secret",

@@ -1,6 +1,11 @@
 """Tests for config module."""
 
+from unittest.mock import MagicMock, patch
+
+import pytest
+
 from claude_watcher.config import Settings
+from claude_watcher.llm import complete
 
 
 def test_defaults() -> None:
@@ -130,12 +135,29 @@ def test_llm_base_url_is_read_from_the_watcher_env(monkeypatch) -> None:
     assert settings.llm_base_url == "https://proxy.example/v1"
 
 
-def test_anthropic_base_url_does_not_reroute_the_client(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_anthropic_base_url_does_not_reroute_the_client(monkeypatch) -> None:
     """A globally exported ANTHROPIC_BASE_URL must not hijack the endpoint.
 
     It names a Messages-API endpoint; this client speaks chat-completions.
+    Asserted at both layers: Settings, and the URL the SDK client is actually
+    built with, so a future `_get_client` reading the env directly fails here.
     """
     monkeypatch.delenv("WATCHER_LLM_BASE_URL", raising=False)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://elsewhere.example")
-    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    settings = Settings(llm_api_key="k", _env_file=None)  # type: ignore[call-arg]
     assert settings.llm_base_url == "http://agentgateway:8082/v1"
+
+    response = MagicMock()
+    response.choices = [MagicMock(message=MagicMock(content="hi"))]
+    response.usage = MagicMock(prompt_tokens=1, completion_tokens=1)
+
+    async def create(**kwargs):
+        return response
+
+    client = MagicMock()
+    client.chat.completions.create = create
+    with patch("claude_watcher.llm.openai.AsyncOpenAI", return_value=client) as cls:
+        await complete("sys", "user", 16, model="local/x", settings=settings)
+
+    assert cls.call_args.kwargs["base_url"] == "http://agentgateway:8082/v1"

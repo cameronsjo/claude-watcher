@@ -88,8 +88,8 @@ make docker-run
 The summarizer speaks the OpenAI chat-completions dialect to whatever
 `WATCHER_LLM_BASE_URL` points at, so it can be routed through any compatible
 gateway or proxy (cost attribution, central rate limits, one credential to
-rotate, provider failover) without a code change. Unset, it uses the default
-below.
+rotate, provider failover) without a code change. Unset (not empty), it uses the
+default below.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -100,8 +100,28 @@ below.
 `ANTHROPIC_BASE_URL` is deliberately **not** read. It names an Anthropic
 Messages-API endpoint, which this client does not speak, and it is often
 exported globally for other tools — honoring it would silently reroute the
-watcher. To use Anthropic's own OpenAI-compatible endpoint, set
-`WATCHER_LLM_BASE_URL=https://api.anthropic.com/v1/`.
+watcher.
+
+To use Anthropic's own OpenAI-compatible endpoint, change the model ids as well
+as the URL — the default ids name a local preset Anthropic does not serve, so
+leaving them in place makes every call 404 and the digest silently degrades to
+the plain changed-page list:
+
+```bash
+WATCHER_LLM_BASE_URL=https://api.anthropic.com/v1/
+WATCHER_LLM_API_KEY=sk-ant-...
+WATCHER_LLM_MAP_MODEL=claude-sonnet-4-6
+WATCHER_LLM_REDUCE_MODEL=claude-sonnet-4-6
+```
+
+Pick a model that accepts `temperature` below 1: the summarizer sends a fixed
+`temperature=0.2`, and Anthropic's endpoint rejects that with a 400 on Claude
+Opus 4.7 and every later model, so `claude-sonnet-4-6` (or
+`claude-haiku-4-5`) works where `claude-sonnet-5-5` does not. The endpoint
+ignores `reasoning_effort`, so `WATCHER_LLM_REASONING_EFFORT` can stay as is.
+Keep `WATCHER_LLM_BASE_URL` unset or set, never empty: an empty value is an
+invalid endpoint, not the default. Use `https://` for any endpoint off the
+cluster, and keep credentials out of the URL itself.
 
 ## Schedule
 

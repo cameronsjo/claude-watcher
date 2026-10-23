@@ -3,7 +3,7 @@
 import argparse
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import structlog
@@ -38,22 +38,27 @@ def _configure_logging(settings: Settings) -> None:
     )
 
 
-def _is_peak_hours() -> bool:
-    """Check if current time is peak hours (Mon-Fri 10AM-9PM CST / 16:00-03:00 UTC)."""
-    now = datetime.now(tz=UTC)
-    # CST = UTC-6, so 10AM CST = 16:00 UTC, 9PM CST = 03:00 UTC (next day)
-    weekday = now.weekday()  # 0=Monday, 6=Sunday
-    hour = now.hour
+def _is_peak_hours(now: datetime | None = None) -> bool:
+    """Check if current time is peak hours (Mon-Fri 10AM-9PM CST)."""
+    # CST = UTC-6. Read the weekday in CST too: 6-9PM CST Friday is already
+    # Saturday in UTC, and 6-9PM CST Sunday is already Monday.
+    local = (now or datetime.now(tz=UTC)) - timedelta(hours=6)
+    return local.weekday() < 5 and 10 <= local.hour < 21
 
-    is_weekday = weekday < 5
-    # Peak is 16:00-23:59 UTC or 00:00-02:59 UTC (wraps midnight)
-    is_peak_time = hour >= 16 or hour < 3
 
-    return is_weekday and is_peak_time
+# The changelog and docs jobs share one snapshots repo, and compute_diff stages
+# everything uncommitted. Without this, a changelog run that starts while a docs
+# run is summarizing picks up the docs pages and delivers them a second time.
+_pipeline_lock = asyncio.Lock()
 
 
 async def _run_pipeline(scope: str, settings: Settings) -> None:
     """Run the fetch → diff → summarize → deliver → commit pipeline."""
+    async with _pipeline_lock:
+        await _run_pipeline_locked(scope, settings)
+
+
+async def _run_pipeline_locked(scope: str, settings: Settings) -> None:
     log = logger.bind(scope=scope)
     log.info("Starting check cycle.")
 
@@ -108,6 +113,12 @@ async def _run_pipeline(scope: str, settings: Settings) -> None:
 
 
 async def _seed_baseline(settings: Settings) -> None:
+    """Seed the baseline under the pipeline lock (see _seed_baseline_locked)."""
+    async with _pipeline_lock:
+        await _seed_baseline_locked(settings)
+
+
+async def _seed_baseline_locked(settings: Settings) -> None:
     """Fetch all sources and commit the baseline without summarizing or delivering.
 
     Establishes the snapshot baseline for a newly added source quietly, so the

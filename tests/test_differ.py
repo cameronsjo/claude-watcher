@@ -204,3 +204,18 @@ def test_commit_leaves_no_orphaned_git_process(tmp_path: Path) -> None:
     if last == "SKIP":
         pytest.skip("cannot become a child subreaper here")
     assert last == "0", result.stdout + result.stderr
+
+
+def test_moved_page_reads_as_removed_plus_new(tmp_path: Path) -> None:
+    """Identical content under a new name is not collapsed into one R line."""
+    (tmp_path / "docs__en__old.md").write_text("same content\n" * 20)
+    compute_diff(tmp_path)
+    commit_snapshot(tmp_path, "test")
+
+    (tmp_path / "docs__en__old.md").rename(tmp_path / "docs__en__new.md")
+    result = compute_diff(tmp_path)
+
+    assert result is not None
+    assert result.removed_pages == ["docs__en__old.md"]
+    assert result.new_pages == ["docs__en__new.md"]
+    assert result.modified_pages == []

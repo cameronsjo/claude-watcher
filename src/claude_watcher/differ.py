@@ -95,11 +95,17 @@ def compute_diff(snapshots_dir: Path) -> DiffResult | None:
         return None
 
     # Get full diff
-    diff_result = _run_git(["diff", "--cached"], cwd=snapshots_dir, check=False)
+    diff_result = _run_git(
+        ["diff", "--cached", "--no-renames"], cwd=snapshots_dir, check=False
+    )
 
-    # Get list of changed files with status
+    # Get list of changed files with status. --no-renames: a moved page reads
+    # as removed plus new, not an R line whose two tab-separated names break
+    # the parse.
     name_status = _run_git(
-        ["diff", "--cached", "--name-status"], cwd=snapshots_dir, check=False
+        ["diff", "--cached", "--no-renames", "--name-status"],
+        cwd=snapshots_dir,
+        check=False,
     )
 
     result = DiffResult(raw_diff=diff_result.stdout)

@@ -100,6 +100,27 @@ async def _fetch_single_page(
             return report_name, is_new, False
 
 
+def _remove_dropped_pages(target_dir: Path, indexed: set[str]) -> None:
+    """Delete snapshots of pages the index no longer lists.
+
+    Without this a page dropped from llms.txt keeps its snapshot forever, so the
+    differ never reports it as removed. Only page snapshots directly in
+    target_dir are touched: every page filename has a ``__`` from its URL path,
+    which leaves CHANGELOG.md (its own job) and subdirectories alone. An empty
+    index is treated as a bad read, not as every page being removed.
+    """
+    if not indexed:
+        logger.warning("Index listed no pages; keeping existing snapshots.")
+        return
+    for path in target_dir.glob("*__*.md"):
+        if path.name not in indexed:
+            path.unlink()
+            logger.info(
+                "Removed snapshot of a page dropped from the index.",
+                filename=path.name,
+            )
+
+
 async def _fetch_source(
     client: httpx.AsyncClient,
     base_url: str,
@@ -114,6 +135,7 @@ async def _fetch_source(
     """
     target_dir.mkdir(parents=True, exist_ok=True)
     urls = await fetch_page_list(client, base_url)
+    _remove_dropped_pages(target_dir, {_url_to_filename(url) for url in urls})
     tasks = [
         _fetch_single_page(client, url, target_dir, semaphore, report_prefix)
         for url in urls

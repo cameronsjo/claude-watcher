@@ -150,8 +150,13 @@ Changed upstream pages → intersect with drift-mappings.yaml
 
 Set `WATCHER_DRIFT_CHECK_ENABLED=true` in your `.env`. Requires `WATCHER_LLM_API_KEY`.
 
-The `NO DRIFT` sentinel is a string match on the model's reply. It is untested
-against a local model, which is one reason the check ships disabled.
+The map model's reply must begin with `CLEAN` on its own line or `DRIFT:`
+followed by findings. The parser tolerates case, whitespace, a code fence, and
+markdown such as `**CLEAN**`, and still reads a leading `NO DRIFT` as clean. Any
+other reply is treated as drift rather than dropped: it is logged as a warning
+(the pair plus the first 200 characters of the reply) and the digest lists the
+pair under **(verdict unparseable)**. The format is still untested against a
+local model, which is one reason the check ships disabled.
 
 The mapping file (`drift-mappings.yaml` at repo root by default) links upstream doc filenames to URLs of your ecosystem files. The filename convention matches the snapshot filenames produced by the fetcher: `docs__en__<page>.md`.
 

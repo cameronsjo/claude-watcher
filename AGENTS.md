@@ -47,9 +47,10 @@ tests/                # Test suite
 ## Issue Tracking
 
 Issues live on GitHub, not in this repo. `bd` (Beads) was retired per
-cadence-groundwork#138, and its empty `.beads/` folder was removed per
-cameronsjo/cadence-ecosystem#426. If a stale `bd` pre-commit hook in
-`.git/hooks/` blocks a commit, delete the hook.
+cameronsjo/cadence-groundwork#138, and its dormant `.beads/` folder
+(config only, no issues) was removed per cameronsjo/cadence-ecosystem#426.
+If a stale `bd` pre-commit hook in `.git/hooks/` blocks a commit, delete
+the hook.
 
 ## Session Completion
 

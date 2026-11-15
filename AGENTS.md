@@ -30,6 +30,9 @@ src/claude_watcher/
 ├── fetcher.py        # Async page fetching from llms.txt + raw GitHub
 ├── differ.py         # Git diff operations, detect new/removed pages
 ├── summarizer.py     # LLM digest generation (via llm.py)
+├── llm.py            # OpenAI-compatible client; every model call goes through it
+├── drift_checker.py  # Upstream-docs vs ecosystem-file drift check
+├── concurrency.py    # Fan-out throttling for model calls
 ├── delivery.py       # Discord webhook + email sending
 └── config.py         # Pydantic Settings, env var config
 snapshots/            # Git-tracked fetched pages (the state store)
